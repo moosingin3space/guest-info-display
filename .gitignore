@@ -1,0 +1,4 @@
+/target
+tools/
+builddir/
+.flatpak-builder/
