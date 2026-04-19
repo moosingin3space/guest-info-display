@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 gpui = "0.2.2"
+gpui-component = "0.5.1"
+gpui-component-assets = "0.5.1"
 
 [build-dependencies]
 pkg-config = "0.3.33"

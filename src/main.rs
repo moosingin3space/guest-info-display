@@ -1,6 +1,10 @@
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, Render, SharedString, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Context, IntoElement, Render, SharedString, Styled, Window, WindowOptions,
+    div, prelude::*,
+};
+use gpui_component::{
+    Root, TitleBar,
+    button::{Button, ButtonVariants},
 };
 
 struct HelloApp {
@@ -10,36 +14,54 @@ struct HelloApp {
 impl Render for HelloApp {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .flex()
-            .flex_col()
-            .bg(rgb(0x2e3440))
-            .size(px(500.0))
-            .justify_center()
-            .items_center()
-            .text_xl()
-            .text_color(rgb(0xd8dee9))
-            .child(format!("Hello, {}!", &self.text))
+            .size_full()
+            .child(
+                TitleBar::new().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child("Guest Info Display"),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .items_center()
+                    .justify_center()
+                    .child(format!("Hello, {}!", &self.text))
+                    .child(
+                        Button::new("ok")
+                            .primary()
+                            .label("Let's Go!")
+                            .on_click(|_, _, _| println!("Clicked!")),
+                    ),
+            )
     }
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(500.), px(500.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Guest Info Display".into()),
+    Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .run(|cx: &mut App| {
+            // CRITICAL: we must initialize gpui components.
+            gpui_component::init(cx);
+
+            cx.open_window(
+                WindowOptions {
+                    titlebar: Some(TitleBar::title_bar_options()),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |_, cx| {
-                cx.new(|_| HelloApp {
-                    text: "GPUI World".into(),
-                })
-            },
-        )
-        .unwrap();
-    });
+                },
+                |window, cx| {
+                    let app = cx.new(|_| HelloApp {
+                        text: "GPUI World".into(),
+                    });
+
+                    cx.new(|cx| Root::new(app, window, cx))
+                },
+            )
+            .unwrap();
+        });
 }
