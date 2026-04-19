@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Guest Info Display
+Comment=Display for guest info for a party
+Type=Application
+# should be the same as the Cargo project name
+Exec=guest-info-display
+Terminal=false
+Categories=Utility;GTK;
+Keywords=Rust;Flatpak;GTK;
+Icon=xyz.mooshq.GuestInfoDisplay
+StartupNotify=true

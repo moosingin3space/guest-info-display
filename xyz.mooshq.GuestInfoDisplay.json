@@ -26,7 +26,7 @@
       "build-commands": [
         "cargo --offline fetch --manifest-path Cargo.toml --verbose",
         "cargo build --offline --release",
-        "install -Dm0755 target/release/guest-info-display ${FLATPAK_DEST}/bin/",
+        "install -Dm0755 target/release/guest-info-display -t ${FLATPAK_DEST}/bin/",
         "install -Dm0644 data/${FLATPAK_ID}.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/",
         "install -Dm0644 data/${FLATPAK_ID}.desktop -t ${FLATPAK_DEST}/share/applications/",
         "install -Dm0644 data/${FLATPAK_ID}.svg -t ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/"

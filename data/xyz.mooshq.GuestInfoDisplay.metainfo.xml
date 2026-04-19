@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<component type="desktop-application">
+  <id>xyz.mooshq.GuestInfoDisplay</id>
+  <metadata_license>CC0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Guest Info Display</name>
+  <summary>A cool display for guest info for a party</summary>
+  <description>
+    <p>This metainfo is part of a Rust Flatpak-ed application</p>
+  </description>
+  <url type="homepage">https://mooshq.xyz/</url>
+<!--
+Open Age Rating Service
+https://hughsie.github.io/oars/index.html
+-->
+  <content_rating type="oars-1.0" />
+  <releases>
+    <release version="0.1.0" date="2026-04-18">
+      <description>
+        <p>First release of app.</p>
+      </description>
+    </release>
+  </releases>
+  <developer_name>Nathan Moos</developer_name>
+  <update_contact>moosingin3space@gmail.com</update_contact>
+
+  <launchable type="desktop-id">xyz.mooshq.GuestInfoDisplay.desktop</launchable>
+</component>
