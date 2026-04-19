@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local};
@@ -12,8 +13,14 @@ use gpui_component::{
     h_flex, v_flex,
 };
 
+mod persistence;
+mod qr_code;
+mod settings_dialog;
+
 struct GuestInfoDisplay {
     now: DateTime<Local>,
+    db: persistence::Database,
+    wifi_creds: Option<persistence::WifiCredentials>,
     _clock_task: Task<()>,
 }
 
@@ -34,15 +41,23 @@ impl GuestInfoDisplay {
             }
         });
 
+        let db = persistence::Database::open().expect("failed to open settings database");
+        let wifi_creds = db.wifi_credentials().ok().flatten();
+
         Self {
             now: Local::now(),
+            db,
+            wifi_creds,
             _clock_task: clock_task,
         }
     }
 }
 
 impl Render for GuestInfoDisplay {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Important: the dialog layer must be rendered, or else dialogs will not spawn.
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+
         let date_str: SharedString = self.now.format("%A, %B %-d").to_string().into();
         let time_str: SharedString = self.now.format("%H:%M:%S").to_string().into();
 
@@ -50,179 +65,214 @@ impl Render for GuestInfoDisplay {
         let surface_border = hsla(0.0, 0.0, 1.0, 0.12);
         let muted_text = hsla(0.0, 0.0, 1.0, 0.55);
 
-        v_flex()
+        div()
             .size_full()
-            .text_color(white())
-            .bg(linear_gradient(
-                180.0,
-                linear_color_stop(rgb(0x0a1033), 0.0),
-                linear_color_stop(rgb(0x3b1d6e), 1.0),
-            ))
             .child(
-                TitleBar::new().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .text_color(black())
-                        .border_2()
-                        .child("Guest Info Display"),
-                ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .px_8()
-                    .py_5()
-                    .items_center()
-                    .justify_between()
+                v_flex()
+                    .size_full()
+                    .text_color(white())
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(rgb(0x0a1033), 0.0),
+                        linear_color_stop(rgb(0x3b1d6e), 1.0),
+                    ))
                     .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(date_str),
+                        TitleBar::new().child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .text_color(black())
+                                .border_2()
+                                .child("Guest Info Display"),
+                        ),
                     )
                     .child(
-                        div()
-                            .text_3xl()
-                            .font_family("Adwaita Mono")
-                            .font_weight(FontWeight::BOLD)
-                            .child(time_str),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .w_full()
-                    .gap_6()
-                    .px_8()
-                    .pb_8()
+                        h_flex()
+                            .w_full()
+                            .px_8()
+                            .py_5()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(date_str),
+                            )
+                            .child(
+                                div()
+                                    .text_3xl()
+                                    .font_family("Adwaita Mono")
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(time_str),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .flex_1()
-                            .h_full()
-                            .gap_8()
-                            .rounded(px(16.))
-                            .bg(surface)
-                            .border_1()
-                            .border_color(surface_border)
-                            .p_6()
-                            .items_start()
+                            .w_full()
+                            .gap_6()
+                            .px_8()
+                            .pb_8()
                             .child(
-                                v_flex()
+                                h_flex()
                                     .flex_1()
                                     .h_full()
-                                    .gap_4()
+                                    .gap_8()
+                                    .rounded(px(16.))
+                                    .bg(surface)
+                                    .border_1()
+                                    .border_color(surface_border)
+                                    .p_6()
+                                    .items_start()
                                     .child(
-                                        div()
-                                            .text_color(muted_text)
-                                            .text_3xl()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Now Playing"),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_5()
-                                            .items_center()
+                                        v_flex()
+                                            .flex_1()
+                                            .h_full()
+                                            .gap_4()
                                             .child(
                                                 div()
-                                                    .flex()
+                                                    .text_color(muted_text)
+                                                    .text_3xl()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child("Now Playing"),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_5()
                                                     .items_center()
-                                                    .justify_center()
-                                                    .size(px(220.))
-                                                    .rounded(px(12.))
-                                                    .bg(hsla(0.0, 0.0, 1.0, 0.08))
                                                     .child(
                                                         div()
-                                                            .text_color(muted_text)
-                                                            .child("Cover Art"),
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .size(px(220.))
+                                                            .rounded(px(12.))
+                                                            .bg(hsla(0.0, 0.0, 1.0, 0.08))
+                                                            .child(
+                                                                div()
+                                                                    .text_color(muted_text)
+                                                                    .child("Cover Art"),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        v_flex()
+                                                            .flex_1()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .text_2xl()
+                                                                    .font_weight(FontWeight::BOLD)
+                                                                    .child("Song Title"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_xl()
+                                                                    .text_color(muted_text)
+                                                                    .child("Artist Name"),
+                                                            ),
                                                     ),
+                                            ),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .w(px(280.))
+                                            .h_full()
+                                            .gap_4()
+                                            .child(
+                                                div()
+                                                    .text_color(muted_text)
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child("Up Next"),
                                             )
                                             .child(
                                                 v_flex()
-                                                    .flex_1()
-                                                    .gap_2()
-                                                    .child(
-                                                        div()
-                                                            .text_2xl()
-                                                            .font_weight(FontWeight::BOLD)
-                                                            .child("Song Title"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xl()
-                                                            .text_color(muted_text)
-                                                            .child("Artist Name"),
-                                                    ),
+                                                    .gap_3()
+                                                    .child(queue_item("Track Two", "Artist Name"))
+                                                    .child(queue_item("Track Three", "Artist Name"))
+                                                    .child(queue_item("Track Four", "Artist Name"))
+                                                    .child(queue_item("Track Five", "Artist Name"))
+                                                    .child(queue_item("Track Six", "Artist Name")),
                                             ),
                                     ),
                             )
                             .child(
                                 v_flex()
-                                    .w(px(280.))
+                                    .w(px(320.))
                                     .h_full()
-                                    .gap_4()
-                                    .child(
-                                        div()
-                                            .text_color(muted_text)
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("Up Next"),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .gap_3()
-                                            .child(queue_item("Track Two", "Artist Name"))
-                                            .child(queue_item("Track Three", "Artist Name"))
-                                            .child(queue_item("Track Four", "Artist Name"))
-                                            .child(queue_item("Track Five", "Artist Name"))
-                                            .child(queue_item("Track Six", "Artist Name")),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .w(px(320.))
-                            .h_full()
-                            .rounded(px(16.))
-                            .bg(surface)
-                            .border_1()
-                            .border_color(surface_border)
-                            .p_6()
-                            .justify_between()
-                            .items_center()
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .gap_4()
+                                    .rounded(px(16.))
+                                    .bg(surface)
+                                    .border_1()
+                                    .border_color(surface_border)
+                                    .p_6()
+                                    .justify_between()
                                     .items_center()
                                     .child(
-                                        div()
-                                            .text_xl()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child("WiFi"),
+                                        v_flex()
+                                            .w_full()
+                                            .gap_4()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .text_xl()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child("Scan to connect to Wi-Fi"),
+                                            )
+                                            .child({
+                                                let container = div()
+                                                    .size(px(220.))
+                                                    .rounded(px(12.))
+                                                    .overflow_hidden();
+                                                if let Some(ref creds) = self.wifi_creds {
+                                                    container.child(qr_code::wifi_qr_element(creds))
+                                                } else {
+                                                    container
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .bg(hsla(0.0, 0.0, 1.0, 0.08))
+                                                        .child(
+                                                            div()
+                                                                .text_color(muted_text)
+                                                                .child("Not configured"),
+                                                        )
+                                                }
+                                            }),
                                     )
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .size(px(220.))
-                                            .rounded(px(12.))
-                                            .bg(hsla(0.0, 0.0, 1.0, 0.08))
-                                            .child(div().text_color(muted_text).child("QR code")),
+                                        Button::new("settings")
+                                            .ghost()
+                                            .icon(Icon::new(IconName::Settings).text_color(white()))
+                                            .large()
+                                            .tooltip("Settings")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let existing =
+                                                    this.db.wifi_credentials().ok().flatten();
+                                                let entity = cx.entity().downgrade();
+                                                settings_dialog::open(
+                                                    existing,
+                                                    Arc::new(move |creds, cx| {
+                                                        entity
+                                                            .update(cx, |this, cx| {
+                                                                this.db
+                                                                    .set_wifi_credentials(&creds)
+                                                                    .ok();
+                                                                this.wifi_creds = Some(creds);
+                                                                cx.notify();
+                                                            })
+                                                            .ok();
+                                                    }),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
                                     ),
-                            )
-                            .child(
-                                Button::new("settings")
-                                    .ghost()
-                                    .icon(Icon::new(IconName::Settings).text_color(white()))
-                                    .large()
-                                    .tooltip("Settings")
-                                    .on_click(|_, _, _| println!("Settings clicked")),
                             ),
                     ),
             )
+            .children(dialog_layer)
     }
 }
 
