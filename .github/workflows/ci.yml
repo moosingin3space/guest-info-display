@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Deny all permissions by default; each job grants only what it needs.
+permissions: {}
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Cache Cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .cargo-home
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build and test
+        uses: wolfi-dev/wolfi-act@d78f3659c50c4520e222df428f4903a1c4b0c6ee # v0.0.1
+        with:
+          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22
+          command: |
+            export CARGO_HOME=/work/.cargo-home
+            cargo build --release
+            cargo test --release
+
+  check-generated-sources:
+    name: Check generated-sources.json in sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Verify generated-sources.json matches Cargo.lock
+        uses: wolfi-dev/wolfi-act@d78f3659c50c4520e222df428f4903a1c4b0c6ee # v0.0.1
+        with:
+          packages: python-3.13,py3-aiohttp,py3-tomlkit,curl
+          command: |
+            curl -fsSL \
+              "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py" \
+              -o /tmp/flatpak-cargo-generator.py
+            python3 /tmp/flatpak-cargo-generator.py /work/Cargo.lock -o /tmp/generated-sources-new.json
+            if ! diff -q /work/generated-sources.json /tmp/generated-sources-new.json > /dev/null 2>&1; then
+              echo "generated-sources.json is out of sync with Cargo.lock."
+              echo "Regenerate with: python3 flatpak-cargo-generator.py Cargo.lock -o generated-sources.json"
+              diff /work/generated-sources.json /tmp/generated-sources-new.json | head -40 || true
+              exit 1
+            fi
+            echo "generated-sources.json is up to date."
+
+  flatpak:
+    name: Build Flatpak
+    needs: check-generated-sources
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6
+        with:
+          bundle: guest-info-display.flatpak
+          manifest-path: xyz.mooshq.GuestInfoDisplay.json
+          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: guest-info-display-flatpak
+          path: guest-info-display.flatpak
+          if-no-files-found: error
+          retention-days: 30
