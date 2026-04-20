@@ -12,6 +12,10 @@ env:
 # Deny all permissions by default; each job grants only what it needs.
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build and Test
