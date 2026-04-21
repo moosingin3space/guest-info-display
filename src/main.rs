@@ -1,17 +1,20 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Local};
 use gpui::{
-    App, Application, Context, FontWeight, IntoElement, Render, SharedString, Styled, Task, Timer,
-    Window, WindowOptions, black, div, hsla, linear_color_stop, linear_gradient, prelude::*, px,
-    rgb, white,
+    App, Application, Context, FontWeight, ImageSource, IntoElement, ObjectFit, Render, RenderImage,
+    SharedString, Styled, Task, Timer, Window, WindowOptions, black, div, hsla, img,
+    linear_color_stop, linear_gradient, prelude::*, px, rgb, white,
 };
 use gpui_component::{
     Icon, IconName, Root, Sizable, TitleBar,
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
+use image::{Frame, RgbaImage};
+use smallvec::SmallVec;
 
 mod persistence;
 mod qr_code;
@@ -25,24 +28,42 @@ struct GuestInfoDisplay {
     spotify_state: spotify::SharedSpotifyState,
     current_track: Option<spotify::SpotifyTrackInfo>,
     next_track: Option<spotify::SpotifyTrackInfo>,
+    covers: HashMap<String, Arc<RenderImage>>,
     _clock_task: Task<()>,
     _spotify_task: Task<()>,
 }
 
 impl GuestInfoDisplay {
     fn new(cx: &mut Context<Self>) -> Self {
-        let handle = spotify::start();
-        let spotify_state = handle.state.clone();
-        let mut updates = handle.updates;
+        let db = persistence::Database::open().expect("failed to open settings database");
+        let wifi_creds = db.wifi_credentials().ok().flatten();
+        let device_id = db
+            .spotify_device_id()
+            .expect("failed to load spotify device id");
 
-        // Dedicated task: wakes immediately when spotify state changes (no 1s lag).
+        let handle = spotify::start(device_id);
+        let spotify_state = handle.state.clone();
+        let events = handle.events;
+
+        // Consolidated spotify task: state changes + cover art events. Wakes immediately
+        // on any update (no 1s lag).
         let spotify_task = cx.spawn(async move |this, cx| {
-            while updates.recv().await.is_ok() {
+            while let Ok(event) = events.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        if let Ok(sp) = this.spotify_state.lock() {
-                            this.current_track = sp.current.clone();
-                            this.next_track = sp.next.clone();
+                        match event {
+                            spotify::Event::StateChanged => {
+                                if let Ok(sp) = this.spotify_state.lock() {
+                                    this.current_track = sp.current.clone();
+                                    this.next_track = sp.next.clone();
+                                }
+                            }
+                            spotify::Event::CoverLoaded(cover) => {
+                                if let Some(image) = build_render_image(&cover) {
+                                    this.covers.insert(cover.url, image);
+                                }
+                            }
+                            spotify::Event::CoversCleared => this.covers.clear(),
                         }
                         cx.notify();
                     })
@@ -69,9 +90,6 @@ impl GuestInfoDisplay {
             }
         });
 
-        let db = persistence::Database::open().expect("failed to open settings database");
-        let wifi_creds = db.wifi_credentials().ok().flatten();
-
         Self {
             now: Local::now(),
             db,
@@ -79,10 +97,19 @@ impl GuestInfoDisplay {
             spotify_state,
             current_track: None,
             next_track: None,
+            covers: HashMap::new(),
             _clock_task: clock_task,
             _spotify_task: spotify_task,
         }
     }
+}
+
+fn build_render_image(cover: &spotify::CoverImage) -> Option<Arc<RenderImage>> {
+    let buffer = RgbaImage::from_raw(cover.width, cover.height, cover.bgra.clone())?;
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(
+        Frame::new(buffer),
+        1,
+    ))))
 }
 
 impl Render for GuestInfoDisplay {
@@ -199,20 +226,36 @@ impl Render for GuestInfoDisplay {
                                                 h_flex()
                                                     .gap_5()
                                                     .items_center()
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
+                                                    .child({
+                                                        let cover = self
+                                                            .current_track
+                                                            .as_ref()
+                                                            .and_then(|t| t.cover_url.as_ref())
+                                                            .and_then(|url| self.covers.get(url))
+                                                            .cloned();
+                                                        let container = div()
                                                             .size(px(220.))
                                                             .rounded(px(12.))
-                                                            .bg(hsla(0.0, 0.0, 1.0, 0.08))
-                                                            .child(
-                                                                div()
-                                                                    .text_color(muted_text)
-                                                                    .child("Cover Art"),
-                                                            ),
-                                                    )
+                                                            .overflow_hidden();
+                                                        if let Some(image) = cover {
+                                                            container.child(
+                                                                img(ImageSource::Render(image))
+                                                                    .object_fit(ObjectFit::Cover)
+                                                                    .size_full(),
+                                                            )
+                                                        } else {
+                                                            container
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .bg(hsla(0.0, 0.0, 1.0, 0.08))
+                                                                .child(
+                                                                    div()
+                                                                        .text_color(muted_text)
+                                                                        .child("Cover Art"),
+                                                                )
+                                                        }
+                                                    })
                                                     .child(
                                                         v_flex()
                                                             .flex_1()

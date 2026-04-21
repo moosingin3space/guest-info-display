@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender, bounded};
@@ -9,9 +10,9 @@ use librespot::{
     metadata::audio::{AudioItem, UniqueFields},
     playback::{
         audio_backend::{Sink, SinkResult},
+        config::PlayerConfig,
         convert::Converter,
         decoder::AudioPacket,
-        config::PlayerConfig,
         mixer::{self, MixerConfig, NoOpVolume},
         player::{Player, PlayerEvent},
     },
@@ -42,16 +43,33 @@ pub struct SpotifyState {
 
 pub type SharedSpotifyState = Arc<Mutex<SpotifyState>>;
 
-pub struct SpotifyHandle {
-    pub state: SharedSpotifyState,
-    /// Yields `()` whenever the Spotify state changes.
-    /// Executor-agnostic — safe to `recv()` from a GPUI task.
-    pub updates: Receiver<()>,
+/// A fetched and decoded piece of cover art, in BGRA8 pixel format (GPUI's internal layout).
+pub struct CoverImage {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
 }
 
-pub fn start() -> SpotifyHandle {
+/// Single channel of Spotify updates to the UI. Executor-agnostic — safe to `recv()`
+/// from a GPUI task.
+pub enum Event {
+    /// `SpotifyState` has been mutated; re-read `SharedSpotifyState`.
+    StateChanged,
+    /// Cover art finished fetching and decoding.
+    CoverLoaded(CoverImage),
+    /// Session ended — drop any cached artwork.
+    CoversCleared,
+}
+
+pub struct SpotifyHandle {
+    pub state: SharedSpotifyState,
+    pub events: Receiver<Event>,
+}
+
+pub fn start(device_id: String) -> SpotifyHandle {
     let state: SharedSpotifyState = Arc::new(Mutex::new(SpotifyState::default()));
-    let (tx, rx) = bounded::<()>(16);
+    let (tx, rx) = bounded::<Event>(16);
 
     let state_clone = state.clone();
     std::thread::spawn(move || {
@@ -59,15 +77,17 @@ pub fn start() -> SpotifyHandle {
             .enable_all()
             .build()
             .expect("tokio runtime")
-            .block_on(discovery_loop(state_clone, tx));
+            .block_on(discovery_loop(device_id, state_clone, tx));
     });
 
-    SpotifyHandle { state, updates: rx }
+    SpotifyHandle { state, events: rx }
 }
 
-async fn discovery_loop(state: SharedSpotifyState, tx: Sender<()>) {
-    let session_config = SessionConfig::default();
-    let device_id = session_config.device_id.clone();
+async fn discovery_loop(device_id: String, state: SharedSpotifyState, tx: Sender<Event>) {
+    let session_config = SessionConfig {
+        device_id: device_id.clone(),
+        ..SessionConfig::default()
+    };
     let client_id = session_config.client_id.clone();
 
     let mut discovery = match Discovery::builder(device_id, client_id)
@@ -93,7 +113,8 @@ async fn discovery_loop(state: SharedSpotifyState, tx: Sender<()>) {
         if let Ok(mut st) = state.lock() {
             *st = SpotifyState::default();
         }
-        let _ = tx.send(()).await;
+        let _ = tx.send(Event::StateChanged).await;
+        let _ = tx.send(Event::CoversCleared).await;
     }
 }
 
@@ -101,7 +122,7 @@ async fn run_session(
     session_config: SessionConfig,
     credentials: Credentials,
     state: SharedSpotifyState,
-    tx: Sender<()>,
+    tx: Sender<Event>,
 ) -> Result<(), librespot::core::Error> {
     let session = Session::new(session_config, None);
     // Do NOT call session.connect() here — Spirc::new() does it internally
@@ -131,6 +152,10 @@ async fn run_session(
 
     log::info!("spotify: Spirc active");
 
+    // Per-session record of cover URLs we've already started fetching, to dedupe.
+    let fetched: Arc<tokio::sync::Mutex<HashSet<String>>> =
+        Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
     tokio::pin!(spirc_task);
 
     loop {
@@ -141,7 +166,7 @@ async fn run_session(
             }
             event = event_rx.recv() => {
                 let Some(event) = event else { break; };
-                handle_event(event, &session, &state, &tx).await;
+                handle_event(event, &session, &state, &tx, &fetched).await;
             }
         }
     }
@@ -153,13 +178,16 @@ async fn handle_event(
     event: PlayerEvent,
     session: &Session,
     state: &SharedSpotifyState,
-    tx: &Sender<()>,
+    tx: &Sender<Event>,
+    fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
 ) {
     let mut changed = false;
+    let mut cover_to_fetch: Option<String> = None;
 
     match event {
         PlayerEvent::TrackChanged { audio_item } => {
             let info = track_info(&audio_item);
+            cover_to_fetch = info.cover_url.clone();
             if let Ok(mut st) = state.lock() {
                 st.current = Some(info);
                 st.next = None;
@@ -169,22 +197,25 @@ async fn handle_event(
         }
         // Fires before TrackChanged; catches the case where Spirc interrupts
         // the load with Stop before start_playback is reached.
-        PlayerEvent::Loading { track_id, .. } => {
-            match AudioItem::get_file(session, track_id).await {
-                Ok(item) => {
-                    if let Ok(mut st) = state.lock() {
-                        st.current = Some(track_info(&item));
-                        changed = true;
-                    }
+        PlayerEvent::Loading { track_id, .. } => match AudioItem::get_file(session, track_id).await
+        {
+            Ok(item) => {
+                let info = track_info(&item);
+                cover_to_fetch = info.cover_url.clone();
+                if let Ok(mut st) = state.lock() {
+                    st.current = Some(info);
+                    changed = true;
                 }
-                Err(e) => log::debug!("spotify: loading metadata: {e}"),
             }
-        }
+            Err(e) => log::debug!("spotify: loading metadata: {e}"),
+        },
         PlayerEvent::Preloading { track_id } => {
             match AudioItem::get_file(session, track_id).await {
                 Ok(item) => {
+                    let info = track_info(&item);
+                    cover_to_fetch = info.cover_url.clone();
                     if let Ok(mut st) = state.lock() {
-                        st.next = Some(track_info(&item));
+                        st.next = Some(info);
                         changed = true;
                     }
                 }
@@ -207,15 +238,66 @@ async fn handle_event(
     }
 
     if changed {
-        let _ = tx.send(()).await;
+        let _ = tx.send(Event::StateChanged).await;
     }
+
+    if let Some(url) = cover_to_fetch {
+        let mut guard = fetched.lock().await;
+        if guard.insert(url.clone()) {
+            drop(guard);
+            let session = session.clone();
+            let tx = tx.clone();
+            let fetched = fetched.clone();
+            tokio::spawn(async move {
+                match fetch_cover(&session, &url).await {
+                    Ok((width, height, bgra)) => {
+                        let _ = tx
+                            .send(Event::CoverLoaded(CoverImage {
+                                url,
+                                width,
+                                height,
+                                bgra,
+                            }))
+                            .await;
+                    }
+                    Err(e) => {
+                        log::debug!("spotify: cover fetch failed: {e}");
+                        // Drop from dedupe set so a retry can happen on the next event.
+                        fetched.lock().await.remove(&url);
+                    }
+                }
+            });
+        }
+    }
+}
+
+async fn fetch_cover(
+    session: &Session,
+    url: &str,
+) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .body(bytes::Bytes::new())?;
+    let bytes = session.http_client().request_body(req).await?;
+
+    let img = image::load_from_memory(&bytes)?.into_rgba8();
+    let (w, h) = img.dimensions();
+    let mut buf = img.into_raw();
+    // GPUI's renderer expects BGRA; the `image` crate decodes to RGBA.
+    for px in buf.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Ok((w, h, buf))
 }
 
 fn track_info(item: &AudioItem) -> SpotifyTrackInfo {
     let artists = match &item.unique_fields {
-        UniqueFields::Track { artists, .. } => {
-            artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ")
-        }
+        UniqueFields::Track { artists, .. } => artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
         UniqueFields::Episode { show_name, .. } => show_name.clone(),
         UniqueFields::Local { artists, .. } => artists.as_deref().unwrap_or("").to_string(),
     };
@@ -225,5 +307,10 @@ fn track_info(item: &AudioItem) -> SpotifyTrackInfo {
         UniqueFields::Local { album, .. } => album.as_deref().unwrap_or("").to_string(),
     };
     let cover_url = item.covers.first().map(|c| c.url.clone());
-    SpotifyTrackInfo { name: item.name.clone(), artists, album, cover_url }
+    SpotifyTrackInfo {
+        name: item.name.clone(),
+        artists,
+        album,
+        cover_url,
+    }
 }

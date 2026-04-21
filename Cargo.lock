@@ -2791,18 +2791,23 @@ name = "guest-info-display"
 version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
+ "bytes",
  "chrono",
  "futures-util",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "http",
+ "image",
  "librespot",
  "log",
  "pkg-config",
  "pretty_env_logger",
  "qrcodegen",
  "rusqlite",
+ "smallvec",
  "tokio",
+ "uuid",
  "vergen",
 ]
 

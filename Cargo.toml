@@ -5,17 +5,22 @@ edition = "2024"
 
 [dependencies]
 async-channel = "2"
+bytes = "1"
 chrono = "0.4"
 futures-util = "0.3"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
+http = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 librespot = "0.8.0"
 log = "0.4.29"
 pretty_env_logger = "0.5.0"
 qrcodegen = "1.8.0"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+smallvec = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
 vergen = "=9.0"
 
 [build-dependencies]

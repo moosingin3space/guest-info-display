@@ -95,6 +95,27 @@ impl Database {
         Ok(())
     }
 
+    /// Returns the persisted Spotify Connect device ID, creating one on first launch.
+    /// Reusing the same ID keeps a single stable entry in Spotify's device list across restarts.
+    pub fn spotify_device_id(&self) -> Result<String> {
+        match self.conn.query_row(
+            "SELECT device_id FROM spotify_config WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(id) => Ok(id),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let id = uuid::Uuid::new_v4().as_hyphenated().to_string();
+                self.conn.execute(
+                    "INSERT INTO spotify_config (id, device_id) VALUES (1, ?1)",
+                    params![id],
+                )?;
+                Ok(id)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wifi_credentials (
@@ -102,6 +123,10 @@ impl Database {
                 ssid     TEXT NOT NULL,
                 password TEXT NOT NULL,
                 security TEXT NOT NULL DEFAULT 'WPA'
+            );
+            CREATE TABLE IF NOT EXISTS spotify_config (
+                id        INTEGER PRIMARY KEY CHECK (id = 1),
+                device_id TEXT NOT NULL
             );",
         )
     }

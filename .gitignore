@@ -3,3 +3,4 @@ tools/
 builddir/
 .flatpak-builder/
 repo/
+specs
