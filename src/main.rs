@@ -16,16 +16,44 @@ use gpui_component::{
 mod persistence;
 mod qr_code;
 mod settings_dialog;
+mod spotify;
 
 struct GuestInfoDisplay {
     now: DateTime<Local>,
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
+    spotify_state: spotify::SharedSpotifyState,
+    current_track: Option<spotify::SpotifyTrackInfo>,
+    next_track: Option<spotify::SpotifyTrackInfo>,
     _clock_task: Task<()>,
+    _spotify_task: Task<()>,
 }
 
 impl GuestInfoDisplay {
     fn new(cx: &mut Context<Self>) -> Self {
+        let handle = spotify::start();
+        let spotify_state = handle.state.clone();
+        let mut updates = handle.updates;
+
+        // Dedicated task: wakes immediately when spotify state changes (no 1s lag).
+        let spotify_task = cx.spawn(async move |this, cx| {
+            while updates.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| {
+                        if let Ok(sp) = this.spotify_state.lock() {
+                            this.current_track = sp.current.clone();
+                            this.next_track = sp.next.clone();
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Clock task: updates the displayed time every second.
         let clock_task = cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_secs(1)).await;
@@ -48,7 +76,11 @@ impl GuestInfoDisplay {
             now: Local::now(),
             db,
             wifi_creds,
+            spotify_state,
+            current_track: None,
+            next_track: None,
             _clock_task: clock_task,
+            _spotify_task: spotify_task,
         }
     }
 }
@@ -60,6 +92,31 @@ impl Render for GuestInfoDisplay {
 
         let date_str: SharedString = self.now.format("%A, %B %-d").to_string().into();
         let time_str: SharedString = self.now.format("%H:%M:%S").to_string().into();
+
+        let track_name: SharedString = self
+            .current_track
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "Nothing playing".to_string())
+            .into();
+        let track_artist: SharedString = self
+            .current_track
+            .as_ref()
+            .map(|t| t.artists.clone())
+            .unwrap_or_default()
+            .into();
+        let next_name: SharedString = self
+            .next_track
+            .as_ref()
+            .map(|t| t.name.clone())
+            .unwrap_or_default()
+            .into();
+        let next_artist: SharedString = self
+            .next_track
+            .as_ref()
+            .map(|t| t.artists.clone())
+            .unwrap_or_default()
+            .into();
 
         let surface = hsla(0.0, 0.0, 1.0, 0.06);
         let surface_border = hsla(0.0, 0.0, 1.0, 0.12);
@@ -164,13 +221,13 @@ impl Render for GuestInfoDisplay {
                                                                 div()
                                                                     .text_2xl()
                                                                     .font_weight(FontWeight::BOLD)
-                                                                    .child("Song Title"),
+                                                                    .child(track_name),
                                                             )
                                                             .child(
                                                                 div()
                                                                     .text_xl()
                                                                     .text_color(muted_text)
-                                                                    .child("Artist Name"),
+                                                                    .child(track_artist),
                                                             ),
                                                     ),
                                             ),
@@ -187,15 +244,21 @@ impl Render for GuestInfoDisplay {
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .child("Up Next"),
                                             )
-                                            .child(
-                                                v_flex()
-                                                    .gap_3()
-                                                    .child(queue_item("Track Two", "Artist Name"))
-                                                    .child(queue_item("Track Three", "Artist Name"))
-                                                    .child(queue_item("Track Four", "Artist Name"))
-                                                    .child(queue_item("Track Five", "Artist Name"))
-                                                    .child(queue_item("Track Six", "Artist Name")),
-                                            ),
+                                            .when(self.next_track.is_some(), |el| {
+                                                el.child(
+                                                    v_flex()
+                                                        .gap_3()
+                                                        .child(queue_item(next_name, next_artist)),
+                                                )
+                                            })
+                                            .when(self.next_track.is_none(), |el| {
+                                                el.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(muted_text)
+                                                        .child("—"),
+                                                )
+                                            }),
                                     ),
                             )
                             .child(
@@ -276,7 +339,7 @@ impl Render for GuestInfoDisplay {
     }
 }
 
-fn queue_item(title: &'static str, artist: &'static str) -> impl IntoElement {
+fn queue_item(title: SharedString, artist: SharedString) -> impl IntoElement {
     v_flex().gap_0p5().child(div().child(title)).child(
         div()
             .text_sm()
@@ -286,6 +349,7 @@ fn queue_item(title: &'static str, artist: &'static str) -> impl IntoElement {
 }
 
 fn main() {
+    pretty_env_logger::init();
     Application::new()
         .with_assets(gpui_component_assets::Assets)
         .run(|cx: &mut App| {
