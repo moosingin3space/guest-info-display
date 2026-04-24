@@ -1,11 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender, bounded};
 use futures_util::StreamExt;
 use librespot::{
     connect::{ConnectConfig, Spirc},
-    core::{Session, SessionConfig, authentication::Credentials, config::DeviceType},
+    core::{
+        Session, SessionConfig, SpotifyUri, authentication::Credentials, config::DeviceType,
+    },
     discovery::Discovery,
     metadata::audio::{AudioItem, UniqueFields},
     playback::{
@@ -37,7 +39,7 @@ pub struct SpotifyTrackInfo {
 #[derive(Clone, Default)]
 pub struct SpotifyState {
     pub current: Option<SpotifyTrackInfo>,
-    pub next: Option<SpotifyTrackInfo>,
+    pub queue: Vec<SpotifyTrackInfo>,
     pub is_playing: bool,
 }
 
@@ -105,8 +107,13 @@ async fn discovery_loop(device_id: String, state: SharedSpotifyState, tx: Sender
     log::info!("spotify: listening for Spotify Connect");
 
     while let Some(credentials) = discovery.next().await {
-        if let Err(e) =
-            run_session(session_config.clone(), credentials, state.clone(), tx.clone()).await
+        if let Err(e) = run_session(
+            session_config.clone(),
+            credentials,
+            state.clone(),
+            tx.clone(),
+        )
+        .await
         {
             log::warn!("spotify: session ended: {e}");
         }
@@ -144,6 +151,7 @@ async fn run_session(
     let connect_config = ConnectConfig {
         name: "Guest Info Display".to_string(),
         device_type: DeviceType::Computer,
+        emit_set_queue_events: true,
         ..ConnectConfig::default()
     };
 
@@ -156,6 +164,11 @@ async fn run_session(
     let fetched: Arc<tokio::sync::Mutex<HashSet<String>>> =
         Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
+    // Per-session cache of track metadata (URI → display info), so we only
+    // hydrate each track once.
+    let metadata_cache: Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
     tokio::pin!(spirc_task);
 
     loop {
@@ -166,7 +179,7 @@ async fn run_session(
             }
             event = event_rx.recv() => {
                 let Some(event) = event else { break; };
-                handle_event(event, &session, &state, &tx, &fetched).await;
+                handle_event(event, &session, &state, &tx, &fetched, &metadata_cache).await;
             }
         }
     }
@@ -174,12 +187,17 @@ async fn run_session(
     Ok(())
 }
 
+/// Maximum number of queue tracks to hydrate metadata for per update.
+/// Keeps network usage bounded — the UI only shows a handful anyway.
+const MAX_QUEUE_HYDRATE: usize = 10;
+
 async fn handle_event(
     event: PlayerEvent,
     session: &Session,
     state: &SharedSpotifyState,
     tx: &Sender<Event>,
     fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
 ) {
     let mut changed = false;
     let mut cover_to_fetch: Option<String> = None;
@@ -190,7 +208,6 @@ async fn handle_event(
             cover_to_fetch = info.cover_url.clone();
             if let Ok(mut st) = state.lock() {
                 st.current = Some(info);
-                st.next = None;
                 st.is_playing = true;
                 changed = true;
             }
@@ -209,19 +226,6 @@ async fn handle_event(
             }
             Err(e) => log::debug!("spotify: loading metadata: {e}"),
         },
-        PlayerEvent::Preloading { track_id } => {
-            match AudioItem::get_file(session, track_id).await {
-                Ok(item) => {
-                    let info = track_info(&item);
-                    cover_to_fetch = info.cover_url.clone();
-                    if let Ok(mut st) = state.lock() {
-                        st.next = Some(info);
-                        changed = true;
-                    }
-                }
-                Err(e) => log::debug!("spotify: preload metadata: {e}"),
-            }
-        }
         PlayerEvent::Playing { .. } => {
             if let Ok(mut st) = state.lock() {
                 st.is_playing = true;
@@ -234,6 +238,11 @@ async fn handle_event(
                 changed = true;
             }
         }
+        PlayerEvent::SetQueue { next_tracks, .. } => {
+            handle_set_queue(next_tracks, session, state, tx, fetched, metadata_cache).await;
+            // handle_set_queue sends its own StateChanged if needed.
+            return;
+        }
         _ => {}
     }
 
@@ -242,33 +251,138 @@ async fn handle_event(
     }
 
     if let Some(url) = cover_to_fetch {
-        let mut guard = fetched.lock().await;
-        if guard.insert(url.clone()) {
-            drop(guard);
-            let session = session.clone();
-            let tx = tx.clone();
-            let fetched = fetched.clone();
-            tokio::spawn(async move {
-                match fetch_cover(&session, &url).await {
-                    Ok((width, height, bgra)) => {
-                        let _ = tx
-                            .send(Event::CoverLoaded(CoverImage {
-                                url,
-                                width,
-                                height,
-                                bgra,
-                            }))
-                            .await;
-                    }
-                    Err(e) => {
-                        log::debug!("spotify: cover fetch failed: {e}");
-                        // Drop from dedupe set so a retry can happen on the next event.
-                        fetched.lock().await.remove(&url);
-                    }
-                }
-            });
+        kick_off_cover_fetch(url, session, tx, fetched).await;
+    }
+}
+
+/// Handle a `SetQueue` player event emitted by Spirc whenever the queue changes
+/// (context loaded, track added, queue set via Connect).
+async fn handle_set_queue(
+    next_tracks: Vec<librespot::playback::player::QueueTrack>,
+    session: &Session,
+    state: &SharedSpotifyState,
+    tx: &Sender<Event>,
+    fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+) {
+    log::debug!("spotify: SetQueue event, {} next tracks", next_tracks.len());
+
+    let uris: Vec<String> = next_tracks
+        .iter()
+        .filter(|t| !t.uri.is_empty())
+        .map(|t| t.uri.clone())
+        .collect();
+
+    // Hydrate metadata for the first N tracks we haven't seen yet.
+    let cache = metadata_cache.lock().await;
+    let mut to_hydrate: Vec<String> = Vec::new();
+    for uri in &uris {
+        if !cache.contains_key(uri) && to_hydrate.len() < MAX_QUEUE_HYDRATE {
+            to_hydrate.push(uri.clone());
         }
     }
+    drop(cache);
+
+    // Fetch metadata in parallel for unknown tracks.
+    let hydrate_futures: Vec<_> = to_hydrate
+        .iter()
+        .filter_map(|uri| {
+            SpotifyUri::from_uri(uri).ok().map(|spotify_uri| {
+                let session = session.clone();
+                let uri = uri.clone();
+                async move {
+                    match AudioItem::get_file(&session, spotify_uri).await {
+                        Ok(item) => Some((uri, track_info(&item))),
+                        Err(e) => {
+                            log::debug!("spotify: metadata hydrate failed for {uri}: {e}");
+                            None
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let results = futures_util::future::join_all(hydrate_futures).await;
+    let mut cache = metadata_cache.lock().await;
+    for result in results.into_iter().flatten() {
+        cache.insert(result.0, result.1);
+    }
+
+    // Build the queue from cached metadata, falling back to URI-only placeholder.
+    let queue: Vec<SpotifyTrackInfo> = uris
+        .iter()
+        .map(|uri| {
+            cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
+                name: uri.clone(),
+                artists: String::new(),
+                album: String::new(),
+                cover_url: None,
+            })
+        })
+        .collect();
+    drop(cache);
+
+    // Kick off cover fetches for queue items.
+    let urls: Vec<String> = queue.iter().filter_map(|t| t.cover_url.clone()).collect();
+
+    let changed = if let Ok(mut st) = state.lock() {
+        let different = st.queue.len() != queue.len()
+            || st
+                .queue
+                .iter()
+                .zip(queue.iter())
+                .any(|(a, b)| a.name != b.name);
+        st.queue = queue;
+        different
+    } else {
+        false
+    };
+
+    if changed {
+        let _ = tx.send(Event::StateChanged).await;
+    }
+
+    for url in urls {
+        kick_off_cover_fetch(url, session, tx, fetched).await;
+    }
+}
+
+/// Spawns a tokio task to fetch + decode a cover image if we haven't already
+/// started one for this URL.
+async fn kick_off_cover_fetch(
+    url: String,
+    session: &Session,
+    tx: &Sender<Event>,
+    fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+) {
+    let mut guard = fetched.lock().await;
+    if !guard.insert(url.clone()) {
+        return;
+    }
+    drop(guard);
+    let session = session.clone();
+    let tx = tx.clone();
+    let fetched = fetched.clone();
+    tokio::spawn(async move {
+        match fetch_cover(&session, &url).await {
+            Ok((width, height, bgra)) => {
+                let _ = tx
+                    .send(Event::CoverLoaded(CoverImage {
+                        url,
+                        width,
+                        height,
+                        bgra,
+                    }))
+                    .await;
+            }
+            Err(e) => {
+                log::debug!("spotify: cover fetch failed: {e}");
+                // Drop from dedupe set so a retry can happen on the next event.
+                fetched.lock().await.remove(&url);
+            }
+        }
+    });
 }
 
 async fn fetch_cover(

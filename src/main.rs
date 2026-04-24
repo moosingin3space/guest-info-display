@@ -27,7 +27,7 @@ struct GuestInfoDisplay {
     wifi_creds: Option<persistence::WifiCredentials>,
     spotify_state: spotify::SharedSpotifyState,
     current_track: Option<spotify::SpotifyTrackInfo>,
-    next_track: Option<spotify::SpotifyTrackInfo>,
+    queue: Vec<spotify::SpotifyTrackInfo>,
     covers: HashMap<String, Arc<RenderImage>>,
     _clock_task: Task<()>,
     _spotify_task: Task<()>,
@@ -55,7 +55,7 @@ impl GuestInfoDisplay {
                             spotify::Event::StateChanged => {
                                 if let Ok(sp) = this.spotify_state.lock() {
                                     this.current_track = sp.current.clone();
-                                    this.next_track = sp.next.clone();
+                                    this.queue = sp.queue.clone();
                                 }
                             }
                             spotify::Event::CoverLoaded(cover) => {
@@ -96,7 +96,7 @@ impl GuestInfoDisplay {
             wifi_creds,
             spotify_state,
             current_track: None,
-            next_track: None,
+            queue: Vec::new(),
             covers: HashMap::new(),
             _clock_task: clock_task,
             _spotify_task: spotify_task,
@@ -132,19 +132,6 @@ impl Render for GuestInfoDisplay {
             .map(|t| t.artists.clone())
             .unwrap_or_default()
             .into();
-        let next_name: SharedString = self
-            .next_track
-            .as_ref()
-            .map(|t| t.name.clone())
-            .unwrap_or_default()
-            .into();
-        let next_artist: SharedString = self
-            .next_track
-            .as_ref()
-            .map(|t| t.artists.clone())
-            .unwrap_or_default()
-            .into();
-
         let surface = hsla(0.0, 0.0, 1.0, 0.06);
         let surface_border = hsla(0.0, 0.0, 1.0, 0.12);
         let muted_text = hsla(0.0, 0.0, 1.0, 0.55);
@@ -287,14 +274,19 @@ impl Render for GuestInfoDisplay {
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .child("Up Next"),
                                             )
-                                            .when(self.next_track.is_some(), |el| {
+                                            .when(!self.queue.is_empty(), |el| {
                                                 el.child(
-                                                    v_flex()
-                                                        .gap_3()
-                                                        .child(queue_item(next_name, next_artist)),
+                                                    v_flex().gap_3().children(
+                                                        self.queue.iter().take(5).map(|t| {
+                                                            queue_item(
+                                                                t.name.clone().into(),
+                                                                t.artists.clone().into(),
+                                                            )
+                                                        }),
+                                                    ),
                                                 )
                                             })
-                                            .when(self.next_track.is_none(), |el| {
+                                            .when(self.queue.is_empty(), |el| {
                                                 el.child(
                                                     div()
                                                         .text_sm()
