@@ -5,9 +5,7 @@ use async_channel::{Receiver, Sender, bounded};
 use futures_util::StreamExt;
 use librespot::{
     connect::{ConnectConfig, Spirc},
-    core::{
-        Session, SessionConfig, SpotifyUri, authentication::Credentials, config::DeviceType,
-    },
+    core::{Session, SessionConfig, SpotifyUri, authentication::Credentials, config::DeviceType},
     discovery::Discovery,
     metadata::audio::{AudioItem, UniqueFields},
     playback::{
@@ -32,7 +30,6 @@ impl Sink for NullSink {
 pub struct SpotifyTrackInfo {
     pub name: String,
     pub artists: String,
-    pub album: String,
     pub cover_url: Option<String>,
 }
 
@@ -316,7 +313,6 @@ async fn handle_set_queue(
             cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
                 name: uri.clone(),
                 artists: String::new(),
-                album: String::new(),
                 cover_url: None,
             })
         })
@@ -415,16 +411,10 @@ fn track_info(item: &AudioItem) -> SpotifyTrackInfo {
         UniqueFields::Episode { show_name, .. } => show_name.clone(),
         UniqueFields::Local { artists, .. } => artists.as_deref().unwrap_or("").to_string(),
     };
-    let album = match &item.unique_fields {
-        UniqueFields::Track { album, .. } => album.clone(),
-        UniqueFields::Episode { show_name, .. } => show_name.clone(),
-        UniqueFields::Local { album, .. } => album.as_deref().unwrap_or("").to_string(),
-    };
     let cover_url = item.covers.first().map(|c| c.url.clone());
     SpotifyTrackInfo {
         name: item.name.clone(),
         artists,
-        album,
         cover_url,
     }
 }
