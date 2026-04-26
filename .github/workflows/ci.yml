@@ -35,7 +35,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build and test
-        uses: wolfi-dev/wolfi-act@d78f3659c50c4520e222df428f4903a1c4b0c6ee # v0.0.1
+        uses: wolfi-dev/wolfi-act@40fdf41723cf735906da3d534f0a3b6f5da2a8c4 # main
         with:
           packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22
           command: |
@@ -54,7 +54,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify generated-sources.json matches Cargo.lock
-        uses: wolfi-dev/wolfi-act@d78f3659c50c4520e222df428f4903a1c4b0c6ee # v0.0.1
+        uses: wolfi-dev/wolfi-act@40fdf41723cf735906da3d534f0a3b6f5da2a8c4 # main
         with:
           packages: python-3.13,py3-aiohttp,py3-tomlkit,curl
           command: |
