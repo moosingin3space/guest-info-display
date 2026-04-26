@@ -16,11 +16,17 @@ The Flatpak manifest is `xyz.mooshq.GuestInfoDisplay.json` targeting `org.freede
 
 ## Architecture
 
-A Rust desktop application using [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (v0.2.2) for rendering. The UI is composed declaratively using GPUI's `Render` trait and `div`/flex layouts, with `gpui-component` (v0.5.1) providing pre-built UI components like `TitleBar` and `Button`.
+A modular Rust desktop application using [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (v0.2.2) for rendering.
 
-The entire application currently lives in `src/main.rs`. `build.rs` links against X11 system libraries (`xcb`, `xkbcommon`, `xkbcommon-x11`) via pkg-config to work around a library paths issue on some Linux OSes.
+### Module Structure
 
-At runtime, GPUI drives the event loop — window creation and component initialization happen inside the `app.run()` closure. State is held in GPUI model types and accessed through `cx` (the GPUI context).
+- `src/main.rs`: Entry point and UI orchestration. Manages the main event loop, GPUI tasks for clock/Spotify, and renders the top-level view.
+- `src/spotify.rs`: Integration with Spotify Connect via `librespot`. Runs a background Tokio runtime for discovery and playback events, exposing a `SharedSpotifyState` (Mutex-protected) and an event channel to the UI.
+- `src/persistence.rs`: SQLite-backed settings storage using `rusqlite` (bundled). Stores Wi-Fi credentials and the Spotify device ID.
+- `src/qr_code.rs`: Wi-Fi QR code generation using `qrcodegen`. Renders QR codes directly to a GPUI `canvas`.
+- `src/settings_dialog.rs`: A declarative GPUI dialog for configuring Wi-Fi credentials.
+
+`build.rs` links against X11 system libraries (`xcb`, `xkbcommon`, `xkbcommon-x11`) via pkg-config to work around library paths issues on some Linux distributions.
 
 ### UI Structure
 
@@ -33,27 +39,24 @@ Body (h_flex, flex_1)
   ├── Spotify card (h_flex, flex_1)
   │   ├── Left column (v_flex, flex_1)
   │   │   ├── "Now Playing" section header
-  │   │   └── h_flex: 220px cover art placeholder + song/artist stack
+  │   │   └── h_flex: 220px Cover Art (fetched asynchronously) + Song/Artist stack
   │   └── Right column (v_flex, 280px)
   │       ├── "Up Next" section header
-  │       └── Queue item list (title + artist rows)
+  │       └── Queue item list (top 5 tracks, hydrated asynchronously)
   └── WiFi sidebar (v_flex, 320px, justify_between)
-      ├── WiFi label + 220px QR code placeholder
+      ├── WiFi label + 220px QR code (generated from persistence)
       └── Settings gear button (bottom)
 ```
 
-### State and live updates
+### State and Live Updates
 
-`GuestInfoDisplay` holds a `chrono::DateTime<Local>` updated every second via a `gpui::Timer`-based loop spawned with `cx.spawn`. The task is stored as `_clock_task: Task<()>` on the struct so it lives for the entity's lifetime; each tick calls `cx.notify()` to trigger a re-render.
+- **Clock**: `GuestInfoDisplay` holds a `chrono::DateTime<Local>` updated every second via a `gpui::Timer` task.
+- **Spotify**: Managed via `_spotify_task` in `main.rs`, which listens for events (StateChanged, CoverLoaded) from the Spotify thread. It updates the local `current_track`, `queue`, and `covers` (HashMap of `RenderImage`) and calls `cx.notify()`.
+- **Persistence**: Wi-Fi credentials are re-read from the database when updated via the settings dialog.
 
-### Visual design
+### Visual Design
 
-Background: `linear_gradient(180°, #0a1033 → #3b1d6e)` (dark navy to deep purple).  
-Cards/panels use `hsla(0,0,1,0.06)` fill with `hsla(0,0,1,0.12)` borders (translucent white over the gradient).  
-Muted text: `hsla(0,0,1,0.55)`.
-
-### Planned features (not yet wired)
-
-- **Spotify panel**: live playlist/queue data from the Spotify API (cover art image, real song/artist/queue).
-- **WiFi sidebar**: rendered QR code for home Wi-Fi credentials.
-- **Settings**: button at the bottom of the sidebar opens a settings panel.
+- Background: `linear_gradient(180°, #0a1033 → #3b1d6e)` (dark navy to deep purple).
+- Cards/panels: `hsla(0,0,1,0.06)` fill with `hsla(0,0,1,0.12)` borders (translucent white).
+- Muted text: `hsla(0,0,1,0.55)`.
+- Typography: Uses `Adwaita Mono` for the clock if available.
