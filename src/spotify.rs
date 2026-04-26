@@ -14,9 +14,10 @@ use librespot::{
         convert::Converter,
         decoder::AudioPacket,
         mixer::{self, MixerConfig, NoOpVolume},
-        player::{Player, PlayerEvent},
+        player::{Player, PlayerEvent, QueueTrack},
     },
 };
+use tokio::task::JoinHandle;
 
 struct NullSink;
 
@@ -28,14 +29,26 @@ impl Sink for NullSink {
 
 #[derive(Clone, Default)]
 pub struct SpotifyTrackInfo {
+    pub uri: String,
     pub name: String,
     pub artists: String,
     pub cover_url: Option<String>,
 }
 
+impl SpotifyTrackInfo {
+    /// True once metadata has been hydrated. Placeholders set `name = uri`,
+    /// so a mismatch means we have a real name.
+    pub fn is_resolved(&self) -> bool {
+        !self.uri.is_empty() && self.uri != self.name
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SpotifyState {
     pub current: Option<SpotifyTrackInfo>,
+    /// Previously-played tracks, oldest first. Used to restore upcoming entries
+    /// when the user navigates backward.
+    pub history: Vec<SpotifyTrackInfo>,
     pub queue: Vec<SpotifyTrackInfo>,
     pub is_playing: bool,
 }
@@ -166,6 +179,10 @@ async fn run_session(
     let metadata_cache: Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
+    // Currently-running background hydration; replaced (and aborted) on each
+    // SetQueue so we never keep stale work around for tracks no longer queued.
+    let mut hydration_task: Option<JoinHandle<()>> = None;
+
     tokio::pin!(spirc_task);
 
     loop {
@@ -176,17 +193,26 @@ async fn run_session(
             }
             event = event_rx.recv() => {
                 let Some(event) = event else { break; };
-                handle_event(event, &session, &state, &tx, &fetched, &metadata_cache).await;
+                handle_event(
+                    event,
+                    &session,
+                    &state,
+                    &tx,
+                    &fetched,
+                    &metadata_cache,
+                    &mut hydration_task,
+                )
+                .await;
             }
         }
     }
 
+    if let Some(h) = hydration_task.take() {
+        h.abort();
+    }
+
     Ok(())
 }
-
-/// Maximum number of queue tracks to hydrate metadata for per update.
-/// Keeps network usage bounded — the UI only shows a handful anyway.
-const MAX_QUEUE_HYDRATE: usize = 10;
 
 async fn handle_event(
     event: PlayerEvent,
@@ -195,6 +221,7 @@ async fn handle_event(
     tx: &Sender<Event>,
     fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
     metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+    hydration_task: &mut Option<JoinHandle<()>>,
 ) {
     let mut changed = false;
     let mut cover_to_fetch: Option<String> = None;
@@ -203,9 +230,7 @@ async fn handle_event(
         PlayerEvent::TrackChanged { audio_item } => {
             let info = track_info(&audio_item);
             cover_to_fetch = info.cover_url.clone();
-            if let Ok(mut st) = state.lock() {
-                st.current = Some(info);
-                st.is_playing = true;
+            if navigate_to(state, info, /*is_playing*/ Some(true)) {
                 changed = true;
             }
         }
@@ -216,8 +241,7 @@ async fn handle_event(
             Ok(item) => {
                 let info = track_info(&item);
                 cover_to_fetch = info.cover_url.clone();
-                if let Ok(mut st) = state.lock() {
-                    st.current = Some(info);
+                if navigate_to(state, info, None) {
                     changed = true;
                 }
             }
@@ -235,8 +259,22 @@ async fn handle_event(
                 changed = true;
             }
         }
-        PlayerEvent::SetQueue { next_tracks, .. } => {
-            handle_set_queue(next_tracks, session, state, tx, fetched, metadata_cache).await;
+        PlayerEvent::SetQueue {
+            next_tracks,
+            prev_tracks,
+            ..
+        } => {
+            handle_set_queue(
+                next_tracks,
+                prev_tracks,
+                session,
+                state,
+                tx,
+                fetched,
+                metadata_cache,
+                hydration_task,
+            )
+            .await;
             // handle_set_queue sends its own StateChanged if needed.
             return;
         }
@@ -252,85 +290,144 @@ async fn handle_event(
     }
 }
 
-/// Handle a `SetQueue` player event emitted by Spirc whenever the queue changes
-/// (context loaded, track added, queue set via Connect).
+/// Slide `new_current` into place, shifting tracks between `queue` and `history`
+/// so the upcoming list stays accurate without a fresh `SetQueue` from librespot
+/// (which is not emitted on natural advance, skip-next, or skip-prev).
+///
+/// `is_playing_override` lets `TrackChanged` force `is_playing = true` without a
+/// separate write; pass `None` to leave the flag alone (e.g. on `Loading`).
+fn navigate_to(
+    state: &SharedSpotifyState,
+    new_current: SpotifyTrackInfo,
+    is_playing_override: Option<bool>,
+) -> bool {
+    let Ok(mut st) = state.lock() else {
+        return false;
+    };
+    let new_uri = new_current.uri.clone();
+
+    if let Some(playing) = is_playing_override {
+        st.is_playing = playing;
+    }
+
+    // Same track as before: just refresh in case metadata improved.
+    if st.current.as_ref().is_some_and(|c| c.uri == new_uri) {
+        st.current = Some(new_current);
+        return true;
+    }
+
+    // Forward: new track sits in the upcoming queue. Move the old current and
+    // any tracks before it into history; pop the new current off the queue.
+    if !new_uri.is_empty()
+        && let Some(pos) = st.queue.iter().position(|t| t.uri == new_uri)
+    {
+        if let Some(old) = st.current.take() {
+            st.history.push(old);
+        }
+        let drained: Vec<_> = st.queue.drain(..pos).collect();
+        st.history.extend(drained);
+        st.queue.remove(0);
+        st.current = Some(new_current);
+        return true;
+    }
+
+    // Backward: new track sits in history. Push the old current to the front of
+    // the queue, move any history entries newer than the target back to the
+    // queue (preserving order), then pop the target itself.
+    if !new_uri.is_empty()
+        && let Some(pos) = st.history.iter().rposition(|t| t.uri == new_uri)
+    {
+        if let Some(old) = st.current.take() {
+            st.queue.insert(0, old);
+        }
+        let after: Vec<_> = st.history.drain(pos + 1..).collect();
+        for t in after.into_iter().rev() {
+            st.queue.insert(0, t);
+        }
+        st.history.pop();
+        st.current = Some(new_current);
+        return true;
+    }
+
+    // Unknown jump (e.g. transferred playback to a new context): just record
+    // the current track and wait for the next SetQueue to repopulate.
+    st.current = Some(new_current);
+    true
+}
+
+/// Handle a `SetQueue` player event emitted by Spirc on context load and
+/// explicit queue mutations.
+#[allow(clippy::too_many_arguments)]
 async fn handle_set_queue(
-    next_tracks: Vec<librespot::playback::player::QueueTrack>,
+    next_tracks: Vec<QueueTrack>,
+    prev_tracks: Vec<QueueTrack>,
     session: &Session,
     state: &SharedSpotifyState,
     tx: &Sender<Event>,
     fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
     metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+    hydration_task: &mut Option<JoinHandle<()>>,
 ) {
-    log::debug!("spotify: SetQueue event, {} next tracks", next_tracks.len());
+    log::debug!(
+        "spotify: SetQueue: {} next, {} prev",
+        next_tracks.len(),
+        prev_tracks.len(),
+    );
 
-    let uris: Vec<String> = next_tracks
-        .iter()
+    let next_uris: Vec<String> = next_tracks
+        .into_iter()
         .filter(|t| !t.uri.is_empty())
-        .map(|t| t.uri.clone())
+        .map(|t| t.uri)
+        .collect();
+    let prev_uris: Vec<String> = prev_tracks
+        .into_iter()
+        .filter(|t| !t.uri.is_empty())
+        .map(|t| t.uri)
         .collect();
 
-    // Hydrate metadata for the first N tracks we haven't seen yet.
-    let cache = metadata_cache.lock().await;
-    let mut to_hydrate: Vec<String> = Vec::new();
-    for uri in &uris {
-        if !cache.contains_key(uri) && to_hydrate.len() < MAX_QUEUE_HYDRATE {
-            to_hydrate.push(uri.clone());
-        }
-    }
-    drop(cache);
+    // Synchronously hydrate the first few visible queue entries so the panel
+    // never opens with raw `spotify:track:...` strings; the background task
+    // below picks up the long tail.
+    prehydrate_visible(&next_uris, session, metadata_cache).await;
 
-    // Fetch metadata in parallel for unknown tracks.
-    let hydrate_futures: Vec<_> = to_hydrate
-        .iter()
-        .filter_map(|uri| {
-            SpotifyUri::from_uri(uri).ok().map(|spotify_uri| {
-                let session = session.clone();
-                let uri = uri.clone();
-                async move {
-                    match AudioItem::get_file(&session, spotify_uri).await {
-                        Ok(item) => Some((uri, track_info(&item))),
-                        Err(e) => {
-                            log::debug!("spotify: metadata hydrate failed for {uri}: {e}");
-                            None
-                        }
-                    }
-                }
-            })
-        })
-        .collect();
-
-    let results = futures_util::future::join_all(hydrate_futures).await;
-    let mut cache = metadata_cache.lock().await;
-    for result in results.into_iter().flatten() {
-        cache.insert(result.0, result.1);
-    }
-
-    // Build the queue from cached metadata, falling back to URI-only placeholder.
-    let queue: Vec<SpotifyTrackInfo> = uris
-        .iter()
-        .map(|uri| {
+    // Build placeholder/cached entries synchronously; actual hydration runs in
+    // the background task spawned below so the UI never wedges on slow lookups.
+    let (queue, history, cached_cover_urls) = {
+        let cache = metadata_cache.lock().await;
+        let make = |uri: &String| {
             cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
+                uri: uri.clone(),
                 name: uri.clone(),
                 artists: String::new(),
                 cover_url: None,
             })
-        })
-        .collect();
-    drop(cache);
-
-    // Kick off cover fetches for queue items.
-    let urls: Vec<String> = queue.iter().filter_map(|t| t.cover_url.clone()).collect();
+        };
+        let queue: Vec<_> = next_uris.iter().map(&make).collect();
+        let history: Vec<_> = prev_uris.iter().map(&make).collect();
+        let urls: Vec<_> = queue
+            .iter()
+            .chain(history.iter())
+            .filter_map(|t| t.cover_url.clone())
+            .collect();
+        (queue, history, urls)
+    };
 
     let changed = if let Ok(mut st) = state.lock() {
-        let different = st.queue.len() != queue.len()
+        let queue_different = st.queue.len() != queue.len()
             || st
                 .queue
                 .iter()
                 .zip(queue.iter())
-                .any(|(a, b)| a.name != b.name);
+                .any(|(a, b)| a.uri != b.uri);
+        let history_different = st.history.len() != history.len()
+            || st
+                .history
+                .iter()
+                .zip(history.iter())
+                .any(|(a, b)| a.uri != b.uri);
         st.queue = queue;
-        different
+        st.history = history;
+        queue_different || history_different
     } else {
         false
     };
@@ -339,8 +436,150 @@ async fn handle_set_queue(
         let _ = tx.send(Event::StateChanged).await;
     }
 
-    for url in urls {
+    for url in cached_cover_urls {
         kick_off_cover_fetch(url, session, tx, fetched).await;
+    }
+
+    // Cancel any in-flight hydration before queuing the new pass — its URIs
+    // may no longer be present after this SetQueue.
+    if let Some(h) = hydration_task.take() {
+        h.abort();
+    }
+
+    // Hydrate upcoming tracks first (visible), then prev (only needed if the
+    // user hits "previous").
+    let mut to_hydrate = next_uris;
+    to_hydrate.extend(prev_uris);
+
+    *hydration_task = Some(tokio::spawn(hydrate_uris(
+        to_hydrate,
+        session.clone(),
+        state.clone(),
+        tx.clone(),
+        fetched.clone(),
+        metadata_cache.clone(),
+    )));
+}
+
+/// Number of upcoming tracks shown in the UI; we hydrate at least this many
+/// before returning from `handle_set_queue` so the panel is never seeded with
+/// raw URI strings.
+const VISIBLE_QUEUE: usize = 5;
+
+/// Block until the first `VISIBLE_QUEUE` uncached entries from `uris` are
+/// resolved (in parallel). Failures are tolerated — the background hydrator
+/// will retry on the next `SetQueue`.
+async fn prehydrate_visible(
+    uris: &[String],
+    session: &Session,
+    metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+) {
+    let needed: Vec<String> = {
+        let cache = metadata_cache.lock().await;
+        uris.iter()
+            .filter(|u| !cache.contains_key(*u))
+            .take(VISIBLE_QUEUE)
+            .cloned()
+            .collect()
+    };
+    if needed.is_empty() {
+        return;
+    }
+
+    let futures = needed.into_iter().filter_map(|uri| {
+        SpotifyUri::from_uri(&uri).ok().map(|spotify_uri| {
+            let session = session.clone();
+            async move {
+                match AudioItem::get_file(&session, spotify_uri).await {
+                    Ok(item) => Some((uri, track_info(&item))),
+                    Err(e) => {
+                        log::debug!("spotify: prehydrate failed for {uri}: {e}");
+                        None
+                    }
+                }
+            }
+        })
+    });
+
+    let results = futures_util::future::join_all(futures).await;
+    let mut cache = metadata_cache.lock().await;
+    for (uri, info) in results.into_iter().flatten() {
+        cache.insert(uri, info);
+    }
+}
+
+/// Background metadata hydration: fetch one URI at a time, stitch the result
+/// into `state`, and emit `StateChanged` so the UI refreshes incrementally.
+/// The task is cancellable by aborting its `JoinHandle`; partial progress is
+/// preserved in the metadata cache for reuse on the next `SetQueue`.
+async fn hydrate_uris(
+    uris: Vec<String>,
+    session: Session,
+    state: SharedSpotifyState,
+    tx: Sender<Event>,
+    fetched: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    metadata_cache: Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+) {
+    for uri in uris {
+        if metadata_cache.lock().await.contains_key(&uri) {
+            continue;
+        }
+
+        let spotify_uri = match SpotifyUri::from_uri(&uri) {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("spotify: hydrate: invalid uri {uri}: {e}");
+                continue;
+            }
+        };
+
+        let info = match AudioItem::get_file(&session, spotify_uri).await {
+            Ok(item) => track_info(&item),
+            Err(e) => {
+                log::debug!("spotify: hydrate: metadata failed for {uri}: {e}");
+                continue;
+            }
+        };
+
+        metadata_cache
+            .lock()
+            .await
+            .insert(uri.clone(), info.clone());
+
+        let cover_url = info.cover_url.clone();
+
+        let updated = if let Ok(mut st) = state.lock() {
+            let mut hit = false;
+            for entry in &mut st.queue {
+                if entry.uri == uri {
+                    *entry = info.clone();
+                    hit = true;
+                }
+            }
+            for entry in &mut st.history {
+                if entry.uri == uri {
+                    *entry = info.clone();
+                    hit = true;
+                }
+            }
+            if let Some(cur) = st.current.as_mut()
+                && cur.uri == uri
+            {
+                *cur = info.clone();
+                hit = true;
+            }
+            hit
+        } else {
+            false
+        };
+
+        if updated {
+            let _ = tx.send(Event::StateChanged).await;
+        }
+
+        if let Some(url) = cover_url {
+            kick_off_cover_fetch(url, &session, &tx, &fetched).await;
+        }
     }
 }
 
@@ -413,8 +652,10 @@ fn track_info(item: &AudioItem) -> SpotifyTrackInfo {
     };
     let cover_url = item.covers.first().map(|c| c.url.clone());
     SpotifyTrackInfo {
+        uri: item.uri.clone(),
         name: item.name.clone(),
         artists,
         cover_url,
     }
 }
+

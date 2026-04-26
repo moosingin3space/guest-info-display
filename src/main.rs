@@ -190,6 +190,7 @@ impl Render for GuestInfoDisplay {
                                 h_flex()
                                     .flex_1()
                                     .h_full()
+                                    .overflow_hidden()
                                     .gap_8()
                                     .rounded(px(16.))
                                     .bg(surface)
@@ -201,6 +202,7 @@ impl Render for GuestInfoDisplay {
                                         v_flex()
                                             .flex_1()
                                             .h_full()
+                                            .overflow_hidden()
                                             .gap_4()
                                             .child(
                                                 div()
@@ -211,6 +213,8 @@ impl Render for GuestInfoDisplay {
                                             )
                                             .child(
                                                 h_flex()
+                                                    .w_full()
+                                                    .overflow_hidden()
                                                     .gap_5()
                                                     .items_center()
                                                     .child({
@@ -246,15 +250,20 @@ impl Render for GuestInfoDisplay {
                                                     .child(
                                                         v_flex()
                                                             .flex_1()
+                                                            .overflow_hidden()
                                                             .gap_2()
                                                             .child(
                                                                 div()
+                                                                    .w_full()
+                                                                    .truncate()
                                                                     .text_2xl()
                                                                     .font_weight(FontWeight::BOLD)
                                                                     .child(track_name),
                                                             )
                                                             .child(
                                                                 div()
+                                                                    .w_full()
+                                                                    .truncate()
                                                                     .text_xl()
                                                                     .text_color(muted_text)
                                                                     .child(track_artist),
@@ -278,10 +287,14 @@ impl Render for GuestInfoDisplay {
                                                 el.child(
                                                     v_flex().gap_3().children(
                                                         self.queue.iter().take(5).map(|t| {
-                                                            queue_item(
-                                                                t.name.clone().into(),
-                                                                t.artists.clone().into(),
-                                                            )
+                                                            if t.is_resolved() {
+                                                                queue_item(
+                                                                    t.name.clone().into(),
+                                                                    t.artists.clone().into(),
+                                                                )
+                                                            } else {
+                                                                queue_item("--".into(), "".into())
+                                                            }
                                                         }),
                                                     ),
                                                 )
@@ -375,12 +388,18 @@ impl Render for GuestInfoDisplay {
 }
 
 fn queue_item(title: SharedString, artist: SharedString) -> impl IntoElement {
-    v_flex().gap_0p5().child(div().child(title)).child(
-        div()
-            .text_sm()
-            .text_color(hsla(0.0, 0.0, 1.0, 0.55))
-            .child(artist),
-    )
+    v_flex()
+        .w_full()
+        .gap_0p5()
+        .child(div().w_full().truncate().child(title))
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .text_sm()
+                .text_color(hsla(0.0, 0.0, 1.0, 0.55))
+                .child(artist),
+        )
 }
 
 fn main() {
