@@ -3,6 +3,27 @@
 Source spec: `specs/multi-screen-and-playback.md`. Read that first for design
 rationale; this document is the build sequence.
 
+## Status
+
+| Ticket | Status |
+| --- | --- |
+| T1 — XDG Inhibit portal | ✅ landed |
+| T2 — rodio sink | ✅ landed |
+| T3 — Audio device picker | ✅ landed |
+| T4 — Identity & role persistence | ✅ landed |
+| T5 — Role radio + label | ✅ landed |
+| T6 — irpc service | ⏳ pending |
+| T7 — iroh endpoint | ⏳ pending |
+| T8 — Primary handlers | ⏳ pending |
+| T9 — Reflection ingest | ⏳ pending |
+| T10 — Discovery + pairing | ⏳ pending |
+| T11 — Peer management UI | ⏳ pending |
+| T12 — Role lifecycle (live) | 🟡 partial — backend tear-down/rebuild on role change is in (`rebuild_backend` in `src/main.rs`); the multi-screen client/server halves don't exist yet |
+| T13 — Disconnected UI | ⏳ pending |
+| T14 — Reflection inhibit | ⏳ pending |
+| T15 — Flatpak manifest | ⏳ pending |
+| T16 — Docs | ⏳ pending |
+
 ## Dependency graph
 
 ```
@@ -39,9 +60,9 @@ release because ashpd, cpal, and iroh all need Flatpak permission grants.
 
 ## Phase 1 — Idle inhibitor
 
-### T1: XDG Inhibit portal integration
+### T1: XDG Inhibit portal integration ✅
 
-**Phase:** 1  **Depends on:** none
+**Phase:** 1  **Depends on:** none  **Status:** landed (`src/inhibitor.rs`, wired in `src/main.rs`)
 
 **Goal:** While `is_playing == true`, hold an idle inhibit so the screen
 doesn't blank. Release on pause/stop and on shutdown.
@@ -92,9 +113,9 @@ Always release on model `Drop`.
 
 ## Phase 2 — Audio playback
 
-### T2: Replace stub player with rodio sink
+### T2: Replace stub player with rodio sink ✅
 
-**Phase:** 2  **Depends on:** none
+**Phase:** 2  **Depends on:** none  **Status:** landed — `librespot` carries `features = ["rodio-backend"]`; `src/spotify.rs` builds the sink via `audio_backend::find(Some("rodio"))` and uses `mixer.get_soft_volume()` for volume passthrough.
 
 **Goal:** Real audio comes out of the speakers when Spotify Connect plays
 a track. Default audio device only — device picker comes in T3.
@@ -133,9 +154,9 @@ real software mixer — we just stop passing `NoOpVolume` next to it.
 
 ---
 
-### T3: Audio device picker in settings
+### T3: Audio device picker in settings ✅
 
-**Phase:** 2  **Depends on:** T2
+**Phase:** 2  **Depends on:** T2  **Status:** landed — `src/audio_devices.rs` enumerates via cpal; `audio_device_name` column added to `spotify_config` (idempotent ALTER probing `pragma_table_info`); dialog has a "System default + …" dropdown; hot-swap via `rebuild_backend` in `src/main.rs`. The reflection-mode gate noted in the original sketch is satisfied implicitly: in reflection role no spotify backend runs, so the dropdown setting is inert.
 
 **Goal:** User can pick which output device plays audio. Selection persists,
 and changing it hot-swaps the running player.
@@ -190,9 +211,9 @@ reconnected: the discovery loop's outer `while let Some(credentials)` in
 
 ## Phase 3 — Multi-screen scaffolding (no wire)
 
-### T4: Identity and role persistence
+### T4: Identity and role persistence ✅
 
-**Phase:** 3  **Depends on:** none (but lands before any other multi-screen ticket)
+**Phase:** 3  **Depends on:** none  **Status:** landed — `iroh = "0.98"` added; `Role` enum and `node_identity` / `role` tables in `src/persistence.rs`; `node_secret()`, `role()`, `set_role()` all in place. EndpointId is logged at debug on startup so the "two restarts → same NodeId" check is observable.
 
 **Goal:** Persist the iroh `SecretKey` and the current role across restarts.
 No networking yet.
@@ -234,9 +255,9 @@ that derives `Clone, Copy, PartialEq` and `ToSql`/`FromSql` like
 
 ---
 
-### T5: Role radio and role indicator label
+### T5: Role radio and role indicator label ✅
 
-**Phase:** 3  **Depends on:** T4
+**Phase:** 3  **Depends on:** T4  **Status:** landed — horizontal `RadioGroup` at the top of the settings dialog (selection pinned through `Rc<Cell<Role>>`); muted `text_sm` role label centered under the body card row in `src/main.rs`. The "restart required" note has been removed because role switching now tears down and rebuilds the backend live (see T12 below).
 
 **Goal:** UI shows the current role at all times, and the user can switch
 between Primary and Reflection in settings (no network effect yet — toggling
@@ -549,9 +570,13 @@ UI resolves.
 
 ---
 
-### T12: Role lifecycle (live switching)
+### T12: Role lifecycle (live switching) 🟡 partial
 
-**Phase:** 4  **Depends on:** T8, T9, T11
+**Phase:** 4  **Depends on:** T8, T9, T11  **Status:** the model-side teardown/rebuild
+landed early (`rebuild_backend` in `src/main.rs`) so role and audio-device changes already
+apply without restart. The remainder of this ticket — wiring in the multi-screen client
+and server task trees and routing them through the same supervisor — still depends on
+T8/T9/T11 and is not done.
 
 **Goal:** Toggling role in settings tears down the active backend and
 spins up the new one without restart.

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use iroh::SecretKey;
 use rusqlite::{Connection, Result, params};
 
 const APP_DIR: &str = "xyz.mooshq.GuestInfoDisplay";
@@ -45,6 +46,41 @@ pub struct WifiCredentials {
     pub ssid: String,
     pub password: String,
     pub security: WifiSecurity,
+}
+
+/// Multi-screen role for this instance. The serialized form is the same string
+/// the spec uses on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Primary,
+    Reflection,
+}
+
+impl Role {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::Primary => "primary",
+            Role::Reflection => "reflection",
+        }
+    }
+}
+
+impl rusqlite::ToSql for Role {
+    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl rusqlite::types::FromSql for Role {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "primary" => Ok(Role::Primary),
+            "reflection" => Ok(Role::Reflection),
+            other => Err(rusqlite::types::FromSqlError::Other(
+                format!("unknown role: {other}").into(),
+            )),
+        }
+    }
 }
 
 pub struct Database {
@@ -140,6 +176,55 @@ impl Database {
         Ok(())
     }
 
+    /// Persistent iroh identity for this instance. Generated on first read so
+    /// the `EndpointId` (== public key) stays stable across restarts.
+    pub fn node_secret(&self) -> Result<SecretKey> {
+        match self.conn.query_row(
+            "SELECT secret_key FROM node_identity WHERE id = 1",
+            [],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => bytes_to_secret(&bytes),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let key = SecretKey::generate();
+                self.conn.execute(
+                    "INSERT INTO node_identity (id, secret_key) VALUES (1, ?1)",
+                    params![key.to_bytes().as_slice()],
+                )?;
+                Ok(key)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Current role. Defaults to [`Role::Primary`] on a fresh database.
+    pub fn role(&self) -> Result<Role> {
+        match self.conn.query_row(
+            "SELECT role FROM role WHERE id = 1",
+            [],
+            |row| row.get::<_, Role>(0),
+        ) {
+            Ok(role) => Ok(role),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.conn.execute(
+                    "INSERT INTO role (id, role) VALUES (1, ?1)",
+                    params![Role::Primary],
+                )?;
+                Ok(Role::Primary)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_role(&self, role: Role) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO role (id, role) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET role = excluded.role",
+            params![role],
+        )?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wifi_credentials (
@@ -151,6 +236,14 @@ impl Database {
             CREATE TABLE IF NOT EXISTS spotify_config (
                 id        INTEGER PRIMARY KEY CHECK (id = 1),
                 device_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS node_identity (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                secret_key BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS role (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),
+                role TEXT NOT NULL DEFAULT 'primary'
             );",
         )?;
 
@@ -171,6 +264,17 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn bytes_to_secret(bytes: &[u8]) -> Result<SecretKey> {
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            bytes.len(),
+            rusqlite::types::Type::Blob,
+            format!("expected 32-byte secret key, got {} bytes", bytes.len()).into(),
+        )
+    })?;
+    Ok(SecretKey::from_bytes(&arr))
 }
 
 /// Returns `$XDG_DATA_HOME/xyz.mooshq.GuestInfoDisplay`, falling back to

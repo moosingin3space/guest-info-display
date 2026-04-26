@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, SharedString, Window, prelude::*, px};
@@ -5,11 +7,12 @@ use gpui_component::{
     IndexPath, WindowExt,
     button::{Button, ButtonVariants},
     input::{Input, InputState},
+    radio::RadioGroup,
     select::{Select, SelectState},
     v_flex,
 };
 
-use crate::persistence::{WifiCredentials, WifiSecurity};
+use crate::persistence::{Role, WifiCredentials, WifiSecurity};
 
 /// Sentinel rendered as the first option in the audio device dropdown to mean
 /// "let cpal/rodio pick the system default each time."
@@ -19,18 +22,22 @@ pub struct DialogValues {
     pub wifi: WifiCredentials,
     /// Selected output device name, or `None` when "System default" is chosen.
     pub audio_device: Option<String>,
+    pub role: Role,
 }
+
+pub type OnSaveFn = Arc<dyn Fn(DialogValues, &mut App) + 'static>;
 
 /// Opens the settings dialog.
 ///
-/// `existing_wifi` and `existing_audio` pre-fill the form fields.
+/// Pre-fills the form fields from the supplied values.
 /// `audio_devices` is the list of cpal output device names to offer.
 /// `on_save` is called with the form values when the user confirms.
 pub fn open(
     existing_wifi: Option<WifiCredentials>,
     existing_audio: Option<String>,
+    existing_role: Role,
     audio_devices: Vec<String>,
-    on_save: Arc<dyn Fn(DialogValues, &mut App) + 'static>,
+    on_save: OnSaveFn,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -79,17 +86,25 @@ pub fn open(
     let audio_options_for_lookup = audio_options.clone();
     let audio_select = cx.new(|cx| SelectState::new(audio_options, audio_initial_idx, window, cx));
 
+    // Role isn't backed by a stateful entity (RadioGroup is a render-only
+    // element), so we pin it through an `Rc<Cell<_>>` so the on_click handler
+    // can write the new selection that the Save button reads.
+    let role_state = Rc::new(Cell::new(existing_role));
+
     window.open_dialog(cx, move |dialog, _, _| {
         let ssid_render = ssid_input.clone();
         let pwd_render = password_input.clone();
         let sec_render = security_select.clone();
         let audio_render = audio_select.clone();
+        let role_render = role_state.clone();
+        let role_handler = role_state.clone();
 
         let ssid_footer = ssid_input.clone();
         let pwd_footer = password_input.clone();
         let sec_footer = security_select.clone();
         let audio_footer = audio_select.clone();
         let audio_options_footer = audio_options_for_lookup.clone();
+        let role_footer = role_state.clone();
         let on_save_footer = on_save.clone();
 
         dialog
@@ -99,6 +114,22 @@ pub fn open(
                 v_flex()
                     .gap_4()
                     .py_2()
+                    .child(
+                        v_flex().gap_1().child("Role").child(
+                            RadioGroup::horizontal("role")
+                                .selected_index(Some(match role_render.get() {
+                                    Role::Primary => 0,
+                                    Role::Reflection => 1,
+                                }))
+                                .children(["Primary", "Reflection"])
+                                .on_click(move |ix, _, _| {
+                                    role_handler.set(match *ix {
+                                        0 => Role::Primary,
+                                        _ => Role::Reflection,
+                                    });
+                                }),
+                        ),
+                    )
                     .child(
                         v_flex()
                             .gap_1()
@@ -130,6 +161,7 @@ pub fn open(
                 let security = sec_footer.clone();
                 let audio = audio_footer.clone();
                 let audio_options = audio_options_footer.clone();
+                let role = role_footer.clone();
                 let on_save = on_save_footer.clone();
 
                 vec![
@@ -163,6 +195,7 @@ pub fn open(
                                         security: sec_val,
                                     },
                                     audio_device: audio_val,
+                                    role: role.get(),
                                 },
                                 cx,
                             );

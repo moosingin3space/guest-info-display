@@ -27,29 +27,30 @@ struct GuestInfoDisplay {
     now: DateTime<Local>,
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
-    spotify: spotify::SpotifyHandle,
+    role: persistence::Role,
+    /// `Some` while `role == Primary`; `None` when running as a reflection (no
+    /// librespot, no audio output). Dropped on role switch to tear the
+    /// discovery loop and rodio sink down.
+    spotify: Option<spotify::SpotifyHandle>,
     current_track: Option<spotify::SpotifyTrackInfo>,
     queue: Vec<spotify::SpotifyTrackInfo>,
     covers: HashMap<String, Arc<RenderImage>>,
     is_playing: bool,
     inhibitor: inhibitor::Inhibitor,
     _clock_task: Task<()>,
-    _spotify_task: Task<()>,
+    _spotify_task: Option<Task<()>>,
 }
 
 impl GuestInfoDisplay {
     fn new(cx: &mut Context<Self>) -> Self {
         let db = persistence::Database::open().expect("failed to open settings database");
         let wifi_creds = db.wifi_credentials().ok().flatten();
-        let device_id = db
-            .spotify_device_id()
-            .expect("failed to load spotify device id");
-        let audio_device = db
-            .audio_device_name()
-            .expect("failed to load audio device name");
+        let role = db.role().expect("failed to load role");
 
-        let spotify = spotify::start(device_id, audio_device);
-        let spotify_task = spawn_spotify_task(spotify.events.clone(), cx);
+        // Touch the persisted iroh identity so a fresh DB generates one immediately
+        // and the EndpointId is logged at debug for verification.
+        let secret = db.node_secret().expect("failed to load iroh identity");
+        log::debug!("multi_screen: EndpointId = {}", secret.public());
 
         // Clock task: updates the displayed time every second.
         let clock_task = cx.spawn(async move |this, cx| {
@@ -67,49 +68,66 @@ impl GuestInfoDisplay {
             }
         });
 
-        Self {
+        let mut this = Self {
             now: Local::now(),
             db,
             wifi_creds,
-            spotify,
+            role,
+            spotify: None,
             current_track: None,
             queue: Vec::new(),
             covers: HashMap::new(),
             is_playing: false,
             inhibitor: inhibitor::Inhibitor::new(),
             _clock_task: clock_task,
-            _spotify_task: spotify_task,
-        }
+            _spotify_task: None,
+        };
+        this.rebuild_backend(cx);
+        this
     }
 
-    /// Replace the running spotify thread with a new one bound to the persisted
-    /// audio-device selection. Called from the settings dialog after the user
-    /// picks a different output device.
-    fn restart_spotify(&mut self, cx: &mut Context<Self>) {
-        let device_id = self
-            .db
-            .spotify_device_id()
-            .expect("failed to load spotify device id");
-        let audio_device = self
-            .db
-            .audio_device_name()
-            .expect("failed to load audio device name");
+    /// Tear down whatever backend is running and start the one matching
+    /// `self.role` and the persisted audio-device selection. Called on role
+    /// change, on audio-device change, and at startup.
+    fn rebuild_backend(&mut self, cx: &mut Context<Self>) {
+        // Drop in-flight work first. Dropping the SpotifyHandle closes its
+        // shutdown channel which exits the discovery loop and releases the
+        // rodio output stream; dropping the GPUI task cancels the event
+        // listener so no late updates land in `self`.
+        self._spotify_task = None;
+        self.spotify = None;
 
-        // Replace the handle first; dropping the old `_shutdown` sender ends
-        // the previous discovery loop and the rodio sink it owns.
-        self.spotify = spotify::start(device_id, audio_device);
         self.current_track = None;
         self.queue.clear();
         self.covers.clear();
         self.is_playing = false;
         self.inhibitor.set(false);
 
-        self._spotify_task = spawn_spotify_task(self.spotify.events.clone(), cx);
+        if self.role == persistence::Role::Primary {
+            let device_id = self
+                .db
+                .spotify_device_id()
+                .expect("failed to load spotify device id");
+            let audio_device = self
+                .db
+                .audio_device_name()
+                .expect("failed to load audio device name");
+
+            let handle = spotify::start(device_id, audio_device);
+            self._spotify_task = Some(spawn_spotify_task(
+                handle.state.clone(),
+                handle.events.clone(),
+                cx,
+            ));
+            self.spotify = Some(handle);
+        }
+
         cx.notify();
     }
 }
 
 fn spawn_spotify_task(
+    state: spotify::SharedSpotifyState,
     events: async_channel::Receiver<spotify::Event>,
     cx: &mut Context<GuestInfoDisplay>,
 ) -> Task<()> {
@@ -119,7 +137,7 @@ fn spawn_spotify_task(
                 .update(cx, |this, cx| {
                     match event {
                         spotify::Event::StateChanged => {
-                            if let Ok(sp) = this.spotify.state.lock() {
+                            if let Ok(sp) = state.lock() {
                                 this.current_track = sp.current.clone();
                                 this.queue = sp.queue.clone();
                                 if sp.is_playing != this.is_playing {
@@ -226,7 +244,7 @@ impl Render for GuestInfoDisplay {
                             .w_full()
                             .gap_6()
                             .px_8()
-                            .pb_8()
+                            .pb_2()
                             .child(
                                 h_flex()
                                     .flex_1()
@@ -404,12 +422,14 @@ impl Render for GuestInfoDisplay {
                                                     this.db.wifi_credentials().ok().flatten();
                                                 let existing_audio =
                                                     this.db.audio_device_name().ok().flatten();
+                                                let existing_role = this.role;
                                                 let audio_devices =
                                                     audio_devices::output_device_names();
                                                 let entity = cx.entity().downgrade();
                                                 settings_dialog::open(
                                                     existing_wifi,
                                                     existing_audio,
+                                                    existing_role,
                                                     audio_devices,
                                                     Arc::new(move |values, cx| {
                                                         entity
@@ -422,12 +442,23 @@ impl Render for GuestInfoDisplay {
                                                                 this.wifi_creds =
                                                                     Some(values.wifi);
 
-                                                                let prev = this
+                                                                let role_changed =
+                                                                    values.role != this.role;
+                                                                if role_changed {
+                                                                    this.db
+                                                                        .set_role(values.role)
+                                                                        .ok();
+                                                                    this.role = values.role;
+                                                                }
+
+                                                                let prev_audio = this
                                                                     .db
                                                                     .audio_device_name()
                                                                     .ok()
                                                                     .flatten();
-                                                                if prev != values.audio_device {
+                                                                let audio_changed =
+                                                                    prev_audio != values.audio_device;
+                                                                if audio_changed {
                                                                     this.db
                                                                         .set_audio_device_name(
                                                                             values
@@ -435,9 +466,13 @@ impl Render for GuestInfoDisplay {
                                                                                 .as_deref(),
                                                                         )
                                                                         .ok();
-                                                                    this.restart_spotify(cx);
                                                                 }
-                                                                cx.notify();
+
+                                                                if role_changed || audio_changed {
+                                                                    this.rebuild_backend(cx);
+                                                                } else {
+                                                                    cx.notify();
+                                                                }
                                                             })
                                                             .ok();
                                                     }),
@@ -447,6 +482,18 @@ impl Render for GuestInfoDisplay {
                                             })),
                                     ),
                             ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .pb_4()
+                            .text_sm()
+                            .text_color(muted_text)
+                            .text_center()
+                            .child(match self.role {
+                                persistence::Role::Primary => "Primary",
+                                persistence::Role::Reflection => "Reflection",
+                            }),
                     ),
             )
             .children(dialog_layer)
