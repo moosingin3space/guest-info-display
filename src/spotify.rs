@@ -9,23 +9,13 @@ use librespot::{
     discovery::Discovery,
     metadata::audio::{AudioItem, UniqueFields},
     playback::{
-        audio_backend::{Sink, SinkResult},
-        config::PlayerConfig,
-        convert::Converter,
-        decoder::AudioPacket,
-        mixer::{self, MixerConfig, NoOpVolume},
+        audio_backend,
+        config::{AudioFormat, PlayerConfig},
+        mixer::{self, MixerConfig},
         player::{Player, PlayerEvent, QueueTrack},
     },
 };
 use tokio::task::JoinHandle;
-
-struct NullSink;
-
-impl Sink for NullSink {
-    fn write(&mut self, _packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
-        Ok(())
-    }
-}
 
 #[derive(Clone, Default)]
 pub struct SpotifyTrackInfo {
@@ -77,11 +67,16 @@ pub enum Event {
 pub struct SpotifyHandle {
     pub state: SharedSpotifyState,
     pub events: Receiver<Event>,
+    /// Holding this keeps the spotify thread alive. On drop, the receiver in
+    /// the discovery loop sees the channel close and the loop exits, which
+    /// brings down the runtime and any in-flight session.
+    _shutdown: Sender<()>,
 }
 
-pub fn start(device_id: String) -> SpotifyHandle {
+pub fn start(device_id: String, audio_device: Option<String>) -> SpotifyHandle {
     let state: SharedSpotifyState = Arc::new(Mutex::new(SpotifyState::default()));
     let (tx, rx) = bounded::<Event>(16);
+    let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
 
     let state_clone = state.clone();
     std::thread::spawn(move || {
@@ -89,13 +84,29 @@ pub fn start(device_id: String) -> SpotifyHandle {
             .enable_all()
             .build()
             .expect("tokio runtime")
-            .block_on(discovery_loop(device_id, state_clone, tx));
+            .block_on(discovery_loop(
+                device_id,
+                audio_device,
+                state_clone,
+                tx,
+                shutdown_rx,
+            ));
     });
 
-    SpotifyHandle { state, events: rx }
+    SpotifyHandle {
+        state,
+        events: rx,
+        _shutdown: shutdown_tx,
+    }
 }
 
-async fn discovery_loop(device_id: String, state: SharedSpotifyState, tx: Sender<Event>) {
+async fn discovery_loop(
+    device_id: String,
+    audio_device: Option<String>,
+    state: SharedSpotifyState,
+    tx: Sender<Event>,
+    shutdown: Receiver<()>,
+) {
     let session_config = SessionConfig {
         device_id: device_id.clone(),
         ..SessionConfig::default()
@@ -116,15 +127,35 @@ async fn discovery_loop(device_id: String, state: SharedSpotifyState, tx: Sender
 
     log::info!("spotify: listening for Spotify Connect");
 
-    while let Some(credentials) = discovery.next().await {
-        if let Err(e) = run_session(
-            session_config.clone(),
-            credentials,
-            state.clone(),
-            tx.clone(),
-        )
-        .await
-        {
+    loop {
+        let credentials = tokio::select! {
+            biased;
+            _ = shutdown.recv() => {
+                log::info!("spotify: shutdown requested, stopping discovery");
+                return;
+            }
+            cred = discovery.next() => match cred {
+                Some(c) => c,
+                None => return,
+            },
+        };
+
+        let session_result = tokio::select! {
+            biased;
+            _ = shutdown.recv() => {
+                log::info!("spotify: shutdown requested, ending active session");
+                return;
+            }
+            r = run_session(
+                session_config.clone(),
+                audio_device.clone(),
+                credentials,
+                state.clone(),
+                tx.clone(),
+            ) => r,
+        };
+
+        if let Err(e) = session_result {
             log::warn!("spotify: session ended: {e}");
         }
         if let Ok(mut st) = state.lock() {
@@ -137,6 +168,7 @@ async fn discovery_loop(device_id: String, state: SharedSpotifyState, tx: Sender
 
 async fn run_session(
     session_config: SessionConfig,
+    audio_device: Option<String>,
     credentials: Credentials,
     state: SharedSpotifyState,
     tx: Sender<Event>,
@@ -145,18 +177,23 @@ async fn run_session(
     // Do NOT call session.connect() here — Spirc::new() does it internally
     // after registering dealer listeners; connecting early causes a double-connect.
 
-    let player = Player::new(
-        PlayerConfig::default(),
-        session.clone(),
-        Box::new(NoOpVolume),
-        || Box::new(NullSink),
-    );
-
-    let mut event_rx = player.get_player_event_channel();
-
     let mk_mixer =
         mixer::find(None).ok_or_else(|| librespot::core::Error::unavailable("no mixer"))?;
     let mixer = mk_mixer(MixerConfig::default())?;
+
+    let sink_builder = audio_backend::find(Some("rodio".to_string()))
+        .ok_or_else(|| librespot::core::Error::unavailable("rodio sink not compiled in"))?;
+    let format = AudioFormat::default();
+    let sink_device = audio_device.clone();
+
+    let player = Player::new(
+        PlayerConfig::default(),
+        session.clone(),
+        mixer.get_soft_volume(),
+        move || sink_builder(sink_device, format),
+    );
+
+    let mut event_rx = player.get_player_event_channel();
 
     let connect_config = ConnectConfig {
         name: "Guest Info Display".to_string(),

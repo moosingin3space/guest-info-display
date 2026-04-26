@@ -4,16 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ashpd = { version = "0.13", features = ["inhibit"] }
 async-channel = "2"
 bytes = "1"
 chrono = "0.4"
+cpal = "0.16"
 futures-util = "0.3"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
 http = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-librespot = { git = "https://github.com/librespot-org/librespot" }
+librespot = { git = "https://github.com/librespot-org/librespot", features = ["rodio-backend"] }
 log = "0.4.29"
 pretty_env_logger = "0.5.0"
 qrcodegen = "1.8.0"

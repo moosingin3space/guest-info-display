@@ -16,6 +16,8 @@ use gpui_component::{
 use image::{Frame, RgbaImage};
 use smallvec::SmallVec;
 
+mod audio_devices;
+mod inhibitor;
 mod persistence;
 mod qr_code;
 mod settings_dialog;
@@ -25,10 +27,12 @@ struct GuestInfoDisplay {
     now: DateTime<Local>,
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
-    spotify_state: spotify::SharedSpotifyState,
+    spotify: spotify::SpotifyHandle,
     current_track: Option<spotify::SpotifyTrackInfo>,
     queue: Vec<spotify::SpotifyTrackInfo>,
     covers: HashMap<String, Arc<RenderImage>>,
+    is_playing: bool,
+    inhibitor: inhibitor::Inhibitor,
     _clock_task: Task<()>,
     _spotify_task: Task<()>,
 }
@@ -40,39 +44,12 @@ impl GuestInfoDisplay {
         let device_id = db
             .spotify_device_id()
             .expect("failed to load spotify device id");
+        let audio_device = db
+            .audio_device_name()
+            .expect("failed to load audio device name");
 
-        let handle = spotify::start(device_id);
-        let spotify_state = handle.state.clone();
-        let events = handle.events;
-
-        // Consolidated spotify task: state changes + cover art events. Wakes immediately
-        // on any update (no 1s lag).
-        let spotify_task = cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        match event {
-                            spotify::Event::StateChanged => {
-                                if let Ok(sp) = this.spotify_state.lock() {
-                                    this.current_track = sp.current.clone();
-                                    this.queue = sp.queue.clone();
-                                }
-                            }
-                            spotify::Event::CoverLoaded(cover) => {
-                                if let Some(image) = build_render_image(&cover) {
-                                    this.covers.insert(cover.url, image);
-                                }
-                            }
-                            spotify::Event::CoversCleared => this.covers.clear(),
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        let spotify = spotify::start(device_id, audio_device);
+        let spotify_task = spawn_spotify_task(spotify.events.clone(), cx);
 
         // Clock task: updates the displayed time every second.
         let clock_task = cx.spawn(async move |this, cx| {
@@ -94,14 +71,78 @@ impl GuestInfoDisplay {
             now: Local::now(),
             db,
             wifi_creds,
-            spotify_state,
+            spotify,
             current_track: None,
             queue: Vec::new(),
             covers: HashMap::new(),
+            is_playing: false,
+            inhibitor: inhibitor::Inhibitor::new(),
             _clock_task: clock_task,
             _spotify_task: spotify_task,
         }
     }
+
+    /// Replace the running spotify thread with a new one bound to the persisted
+    /// audio-device selection. Called from the settings dialog after the user
+    /// picks a different output device.
+    fn restart_spotify(&mut self, cx: &mut Context<Self>) {
+        let device_id = self
+            .db
+            .spotify_device_id()
+            .expect("failed to load spotify device id");
+        let audio_device = self
+            .db
+            .audio_device_name()
+            .expect("failed to load audio device name");
+
+        // Replace the handle first; dropping the old `_shutdown` sender ends
+        // the previous discovery loop and the rodio sink it owns.
+        self.spotify = spotify::start(device_id, audio_device);
+        self.current_track = None;
+        self.queue.clear();
+        self.covers.clear();
+        self.is_playing = false;
+        self.inhibitor.set(false);
+
+        self._spotify_task = spawn_spotify_task(self.spotify.events.clone(), cx);
+        cx.notify();
+    }
+}
+
+fn spawn_spotify_task(
+    events: async_channel::Receiver<spotify::Event>,
+    cx: &mut Context<GuestInfoDisplay>,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        while let Ok(event) = events.recv().await {
+            if this
+                .update(cx, |this, cx| {
+                    match event {
+                        spotify::Event::StateChanged => {
+                            if let Ok(sp) = this.spotify.state.lock() {
+                                this.current_track = sp.current.clone();
+                                this.queue = sp.queue.clone();
+                                if sp.is_playing != this.is_playing {
+                                    this.is_playing = sp.is_playing;
+                                    this.inhibitor.set(sp.is_playing);
+                                }
+                            }
+                        }
+                        spotify::Event::CoverLoaded(cover) => {
+                            if let Some(image) = build_render_image(&cover) {
+                                this.covers.insert(cover.url, image);
+                            }
+                        }
+                        spotify::Event::CoversCleared => this.covers.clear(),
+                    }
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
 }
 
 fn build_render_image(cover: &spotify::CoverImage) -> Option<Arc<RenderImage>> {
@@ -359,18 +400,43 @@ impl Render for GuestInfoDisplay {
                                             .large()
                                             .tooltip("Settings")
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                let existing =
+                                                let existing_wifi =
                                                     this.db.wifi_credentials().ok().flatten();
+                                                let existing_audio =
+                                                    this.db.audio_device_name().ok().flatten();
+                                                let audio_devices =
+                                                    audio_devices::output_device_names();
                                                 let entity = cx.entity().downgrade();
                                                 settings_dialog::open(
-                                                    existing,
-                                                    Arc::new(move |creds, cx| {
+                                                    existing_wifi,
+                                                    existing_audio,
+                                                    audio_devices,
+                                                    Arc::new(move |values, cx| {
                                                         entity
                                                             .update(cx, |this, cx| {
                                                                 this.db
-                                                                    .set_wifi_credentials(&creds)
+                                                                    .set_wifi_credentials(
+                                                                        &values.wifi,
+                                                                    )
                                                                     .ok();
-                                                                this.wifi_creds = Some(creds);
+                                                                this.wifi_creds =
+                                                                    Some(values.wifi);
+
+                                                                let prev = this
+                                                                    .db
+                                                                    .audio_device_name()
+                                                                    .ok()
+                                                                    .flatten();
+                                                                if prev != values.audio_device {
+                                                                    this.db
+                                                                        .set_audio_device_name(
+                                                                            values
+                                                                                .audio_device
+                                                                                .as_deref(),
+                                                                        )
+                                                                        .ok();
+                                                                    this.restart_spotify(cx);
+                                                                }
                                                                 cx.notify();
                                                             })
                                                             .ok();

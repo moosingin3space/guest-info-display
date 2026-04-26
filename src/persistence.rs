@@ -116,6 +116,30 @@ impl Database {
         }
     }
 
+    /// Saved cpal output device name, or `None` when the user has selected
+    /// "System default" (or hasn't picked anything yet).
+    pub fn audio_device_name(&self) -> Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT audio_device_name FROM spotify_config WHERE id = 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(name) => Ok(name),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_audio_device_name(&self, name: Option<&str>) -> Result<()> {
+        // The row exists once spotify_device_id() has run, which it always
+        // does at startup before settings are reachable.
+        self.conn.execute(
+            "UPDATE spotify_config SET audio_device_name = ?1 WHERE id = 1",
+            params![name],
+        )?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wifi_credentials (
@@ -128,7 +152,24 @@ impl Database {
                 id        INTEGER PRIMARY KEY CHECK (id = 1),
                 device_id TEXT NOT NULL
             );",
-        )
+        )?;
+
+        // Add audio_device_name as a separate ALTER so existing databases
+        // upgrade in place. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we
+        // probe pragma_table_info first.
+        let has_audio_col: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('spotify_config')
+                WHERE name = 'audio_device_name'
+            )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !has_audio_col {
+            self.conn
+                .execute("ALTER TABLE spotify_config ADD COLUMN audio_device_name TEXT", [])?;
+        }
+        Ok(())
     }
 }
 
