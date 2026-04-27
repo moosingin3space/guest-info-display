@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,7 @@ use smallvec::SmallVec;
 
 mod audio_devices;
 mod inhibitor;
+mod multi_screen;
 mod persistence;
 mod qr_code;
 mod settings_dialog;
@@ -32,6 +33,17 @@ struct GuestInfoDisplay {
     /// librespot, no audio output). Dropped on role switch to tear the
     /// discovery loop and rodio sink down.
     spotify: Option<spotify::SpotifyHandle>,
+    /// `Some` while `role == Reflection` and a primary is paired. Holds the
+    /// dial loop that produces (state, events) for the GPUI consumer.
+    reflection: Option<multi_screen::ReflectionHandle>,
+    /// iroh endpoint + RPC service. Identity is symmetric across roles, so we
+    /// keep one runtime alive for the lifetime of the model regardless of role.
+    _multi_screen: multi_screen::MultiScreenHandle,
+    /// Pending pairing approval requests from unknown peers. Head is rendered
+    /// as an overlay; user clicks Approve/Reject to advance.
+    pending_approvals: VecDeque<multi_screen::PendingApproval>,
+    /// Primaries seen on the LAN via mDNS. Drained when settings is opened.
+    discovered_primaries: HashSet<iroh::EndpointId>,
     current_track: Option<spotify::SpotifyTrackInfo>,
     queue: Vec<spotify::SpotifyTrackInfo>,
     covers: HashMap<String, Arc<RenderImage>>,
@@ -39,6 +51,8 @@ struct GuestInfoDisplay {
     inhibitor: inhibitor::Inhibitor,
     _clock_task: Task<()>,
     _spotify_task: Option<Task<()>>,
+    _approvals_task: Task<()>,
+    _discovery_task: Task<()>,
 }
 
 impl GuestInfoDisplay {
@@ -47,10 +61,47 @@ impl GuestInfoDisplay {
         let wifi_creds = db.wifi_credentials().ok().flatten();
         let role = db.role().expect("failed to load role");
 
-        // Touch the persisted iroh identity so a fresh DB generates one immediately
-        // and the EndpointId is logged at debug for verification.
         let secret = db.node_secret().expect("failed to load iroh identity");
         log::debug!("multi_screen: EndpointId = {}", secret.public());
+        let multi_screen = multi_screen::start(secret);
+
+        // Seed the inbound trusted set from already-paired reflections so they
+        // can subscribe right after startup.
+        if let Ok(inbound) = db.paired_peers(persistence::Direction::Inbound) {
+            let ids: HashSet<_> = inbound.into_iter().map(|p| p.endpoint_id).collect();
+            multi_screen.seed_inbound_trusted(ids);
+        }
+
+        let approvals_rx = multi_screen.approvals();
+        let approvals_task = cx.spawn(async move |this, cx| {
+            while let Ok(approval) = approvals_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.pending_approvals.push_back(approval);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let discovered_rx = multi_screen.discovered();
+        let discovery_task = cx.spawn(async move |this, cx| {
+            while let Ok(node) = discovered_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.discovered_primaries.insert(node.endpoint_id) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         // Clock task: updates the displayed time every second.
         let clock_task = cx.spawn(async move |this, cx| {
@@ -74,6 +125,10 @@ impl GuestInfoDisplay {
             wifi_creds,
             role,
             spotify: None,
+            reflection: None,
+            _multi_screen: multi_screen,
+            pending_approvals: VecDeque::new(),
+            discovered_primaries: HashSet::new(),
             current_track: None,
             queue: Vec::new(),
             covers: HashMap::new(),
@@ -81,6 +136,8 @@ impl GuestInfoDisplay {
             inhibitor: inhibitor::Inhibitor::new(),
             _clock_task: clock_task,
             _spotify_task: None,
+            _approvals_task: approvals_task,
+            _discovery_task: discovery_task,
         };
         this.rebuild_backend(cx);
         this
@@ -96,6 +153,7 @@ impl GuestInfoDisplay {
         // listener so no late updates land in `self`.
         self._spotify_task = None;
         self.spotify = None;
+        self.reflection = None;
 
         self.current_track = None;
         self.queue.clear();
@@ -103,23 +161,39 @@ impl GuestInfoDisplay {
         self.is_playing = false;
         self.inhibitor.set(false);
 
-        if self.role == persistence::Role::Primary {
-            let device_id = self
-                .db
-                .spotify_device_id()
-                .expect("failed to load spotify device id");
-            let audio_device = self
-                .db
-                .audio_device_name()
-                .expect("failed to load audio device name");
+        match self.role {
+            persistence::Role::Primary => {
+                let device_id = self
+                    .db
+                    .spotify_device_id()
+                    .expect("failed to load spotify device id");
+                let audio_device = self
+                    .db
+                    .audio_device_name()
+                    .expect("failed to load audio device name");
 
-            let handle = spotify::start(device_id, audio_device);
-            self._spotify_task = Some(spawn_spotify_task(
-                handle.state.clone(),
-                handle.events.clone(),
-                cx,
-            ));
-            self.spotify = Some(handle);
+                let handle = spotify::start(device_id, audio_device);
+                self._spotify_task = Some(spawn_spotify_task(
+                    handle.state.clone(),
+                    handle.events.clone(),
+                    cx,
+                ));
+                self.spotify = Some(handle);
+            }
+            persistence::Role::Reflection => {
+                if let Ok(Some(primary)) = self.db.paired_primary() {
+                    let handle = self._multi_screen.start_reflection(primary.endpoint_id);
+                    self._spotify_task = Some(spawn_spotify_task(
+                        handle.state.clone(),
+                        handle.events.clone(),
+                        cx,
+                    ));
+                    self.reflection = Some(handle);
+                }
+                // No paired primary yet: leave both fields empty. The render
+                // layer shows the default "Nothing playing" card; T13 lands a
+                // proper "Primary unavailable" empty state.
+            }
         }
 
         cx.notify();
@@ -144,14 +218,20 @@ fn spawn_spotify_task(
                                     this.is_playing = sp.is_playing;
                                     this.inhibitor.set(sp.is_playing);
                                 }
+                                this._multi_screen.broadcast_state(sp.clone());
                             }
                         }
                         spotify::Event::CoverLoaded(cover) => {
+                            this._multi_screen
+                                .broadcast_cover(cover.url.clone(), cover.encoded.clone());
                             if let Some(image) = build_render_image(&cover) {
                                 this.covers.insert(cover.url, image);
                             }
                         }
-                        spotify::Event::CoversCleared => this.covers.clear(),
+                        spotify::Event::CoversCleared => {
+                            this._multi_screen.broadcast_covers_cleared();
+                            this.covers.clear();
+                        }
                     }
                     cx.notify();
                 })
@@ -161,6 +241,25 @@ fn spawn_spotify_task(
             }
         }
     })
+}
+
+/// Best-effort hostname lookup for use as the default `friendly_name` in the
+/// pairing handshake. Falls back through `$HOSTNAME` → `/etc/hostname` → a
+/// generic literal so it always returns something sensible.
+fn local_hostname() -> String {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(contents) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = contents.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "Reflection".to_string()
 }
 
 fn build_render_image(cover: &spotify::CoverImage) -> Option<Arc<RenderImage>> {
@@ -197,6 +296,7 @@ impl Render for GuestInfoDisplay {
 
         div()
             .size_full()
+            .relative()
             .child(
                 v_flex()
                     .size_full()
@@ -425,12 +525,19 @@ impl Render for GuestInfoDisplay {
                                                 let existing_role = this.role;
                                                 let audio_devices =
                                                     audio_devices::output_device_names();
+                                                let discovered: Vec<_> =
+                                                    this.discovered_primaries.iter().copied().collect();
+                                                let paired_primary =
+                                                    this.db.paired_primary().ok().flatten();
                                                 let entity = cx.entity().downgrade();
+                                                let entity_pair = entity.clone();
                                                 settings_dialog::open(
                                                     existing_wifi,
                                                     existing_audio,
                                                     existing_role,
                                                     audio_devices,
+                                                    discovered,
+                                                    paired_primary,
                                                     Arc::new(move |values, cx| {
                                                         entity
                                                             .update(cx, |this, cx| {
@@ -476,6 +583,52 @@ impl Render for GuestInfoDisplay {
                                                             })
                                                             .ok();
                                                     }),
+                                                    Arc::new(move |primary_id, cx| {
+                                                        let _ = entity_pair.update(cx, |this, cx| {
+                                                            let recv = this
+                                                                ._multi_screen
+                                                                .request_pairing(
+                                                                    primary_id,
+                                                                    local_hostname(),
+                                                                );
+                                                            cx.spawn(async move |this, cx| {
+                                                                let response = match recv.recv().await {
+                                                                    Ok(Some(r)) => r,
+                                                                    _ => {
+                                                                        log::warn!(
+                                                                            "pairing: no response from primary"
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                };
+                                                                if !matches!(
+                                                                    response,
+                                                                    multi_screen::PairingResponse::Accepted
+                                                                ) {
+                                                                    log::info!("pairing: rejected by primary");
+                                                                    return;
+                                                                }
+                                                                let _ = this.update(cx, |this, cx| {
+                                                                    let label = format!(
+                                                                        "Primary {}",
+                                                                        primary_id.fmt_short()
+                                                                    );
+                                                                    if let Err(e) = this.db.add_paired_peer(
+                                                                        primary_id,
+                                                                        &label,
+                                                                        persistence::Direction::Outbound,
+                                                                    ) {
+                                                                        log::warn!(
+                                                                            "pairing: persist failed: {e}"
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                    this.rebuild_backend(cx);
+                                                                });
+                                                            })
+                                                            .detach();
+                                                        });
+                                                    }),
                                                     window,
                                                     cx,
                                                 );
@@ -496,8 +649,96 @@ impl Render for GuestInfoDisplay {
                             }),
                     ),
             )
+            .when(!self.pending_approvals.is_empty(), |el| {
+                el.child(approval_overlay(self, cx, surface_border, muted_text))
+            })
             .children(dialog_layer)
     }
+}
+
+fn approval_overlay(
+    this: &GuestInfoDisplay,
+    cx: &mut Context<GuestInfoDisplay>,
+    surface_border: gpui::Hsla,
+    muted_text: gpui::Hsla,
+) -> impl IntoElement {
+    let approval = this
+        .pending_approvals
+        .front()
+        .expect("approval_overlay called with empty queue");
+    let friendly_name: SharedString = approval.friendly_name.clone().into();
+    let endpoint_short: SharedString = format!("{}", approval.endpoint_id.fmt_short()).into();
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.55))
+        .child(
+            v_flex()
+                .gap_4()
+                .p_8()
+                .w(px(420.))
+                .rounded(px(16.))
+                .bg(rgb(0x1a1f3d))
+                .border_1()
+                .border_color(surface_border)
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Pair this device?"),
+                )
+                .child(div().child(friendly_name))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted_text)
+                        .child(endpoint_short),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .justify_end()
+                        .child(
+                            Button::new("approval-reject")
+                                .outline()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(approval) = this.pending_approvals.pop_front() {
+                                        let _ = approval
+                                            .respond
+                                            .send(multi_screen::PairingResponse::Rejected);
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("approval-approve")
+                                .primary()
+                                .label("Approve")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let Some(approval) = this.pending_approvals.pop_front() else {
+                                        return;
+                                    };
+                                    if let Err(e) = this.db.add_paired_peer(
+                                        approval.endpoint_id,
+                                        &approval.friendly_name,
+                                        persistence::Direction::Inbound,
+                                    ) {
+                                        log::warn!("approval: persist failed: {e}");
+                                    }
+                                    this._multi_screen.add_inbound_trusted(approval.endpoint_id);
+                                    let _ = approval
+                                        .respond
+                                        .send(multi_screen::PairingResponse::Accepted);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+        )
 }
 
 fn queue_item(title: SharedString, artist: SharedString) -> impl IntoElement {

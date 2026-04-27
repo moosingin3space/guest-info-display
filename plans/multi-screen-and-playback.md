@@ -12,13 +12,13 @@ rationale; this document is the build sequence.
 | T3 — Audio device picker | ✅ landed |
 | T4 — Identity & role persistence | ✅ landed |
 | T5 — Role radio + label | ✅ landed |
-| T6 — irpc service | ⏳ pending |
-| T7 — iroh endpoint | ⏳ pending |
-| T8 — Primary handlers | ⏳ pending |
-| T9 — Reflection ingest | ⏳ pending |
-| T10 — Discovery + pairing | ⏳ pending |
+| T6 — irpc service | ✅ landed |
+| T7 — iroh endpoint | ✅ landed |
+| T8 — Primary handlers | ✅ landed |
+| T9 — Reflection ingest | ✅ landed |
+| T10 — Discovery + pairing | ✅ landed |
 | T11 — Peer management UI | ⏳ pending |
-| T12 — Role lifecycle (live) | 🟡 partial — backend tear-down/rebuild on role change is in (`rebuild_backend` in `src/main.rs`); the multi-screen client/server halves don't exist yet |
+| T12 — Role lifecycle (live) | 🟡 functional via T6–T10 — `rebuild_backend` swaps between `spotify::start` and `multi_screen::start_reflection` cleanly when role/audio device/paired primary change. The proposed `BackendHandle` enum consolidation is still optional cleanup. |
 | T13 — Disconnected UI | ⏳ pending |
 | T14 — Reflection inhibit | ⏳ pending |
 | T15 — Flatpak manifest | ⏳ pending |

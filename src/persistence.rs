@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use iroh::SecretKey;
+use iroh::{EndpointId, SecretKey};
 use rusqlite::{Connection, Result, params};
 
 const APP_DIR: &str = "xyz.mooshq.GuestInfoDisplay";
@@ -81,6 +81,49 @@ impl rusqlite::types::FromSql for Role {
             )),
         }
     }
+}
+
+/// Direction relative to *this* node:
+/// - `Inbound`: the peer is one of our reflections (we are their primary).
+/// - `Outbound`: the peer is our primary (we are their reflection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Inbound,
+    Outbound,
+}
+
+impl Direction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Direction::Inbound => "inbound",
+            Direction::Outbound => "outbound",
+        }
+    }
+}
+
+impl rusqlite::ToSql for Direction {
+    fn to_sql(&self) -> Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::from(self.as_str()))
+    }
+}
+
+impl rusqlite::types::FromSql for Direction {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        match value.as_str()? {
+            "inbound" => Ok(Direction::Inbound),
+            "outbound" => Ok(Direction::Outbound),
+            other => Err(rusqlite::types::FromSqlError::Other(
+                format!("unknown pairing direction: {other}").into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PairedPeer {
+    pub endpoint_id: EndpointId,
+    pub friendly_name: String,
+    pub direction: Direction,
 }
 
 pub struct Database {
@@ -225,6 +268,57 @@ impl Database {
         Ok(())
     }
 
+    pub fn add_paired_peer(
+        &self,
+        endpoint_id: EndpointId,
+        friendly_name: &str,
+        direction: Direction,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO paired_peers (endpoint_id, friendly_name, direction)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(endpoint_id) DO UPDATE SET
+                 friendly_name = excluded.friendly_name,
+                 direction     = excluded.direction",
+            params![endpoint_id.as_bytes().as_slice(), friendly_name, direction],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_paired_peer(&self, endpoint_id: EndpointId) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM paired_peers WHERE endpoint_id = ?1",
+            params![endpoint_id.as_bytes().as_slice()],
+        )?;
+        Ok(())
+    }
+
+    pub fn paired_peers(&self, direction: Direction) -> Result<Vec<PairedPeer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT endpoint_id, friendly_name, direction
+             FROM paired_peers
+             WHERE direction = ?1",
+        )?;
+        let rows = stmt.query_map(params![direction], |row| {
+            let bytes: Vec<u8> = row.get(0)?;
+            let endpoint_id = bytes_to_endpoint_id(&bytes)?;
+            Ok(PairedPeer {
+                endpoint_id,
+                friendly_name: row.get(1)?,
+                direction: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Reflection-side: the single primary we're paired with, if any. Spec
+    /// guarantees at most one outbound peer at a time, so we just take the
+    /// first row.
+    pub fn paired_primary(&self) -> Result<Option<PairedPeer>> {
+        let mut peers = self.paired_peers(Direction::Outbound)?;
+        Ok(peers.pop())
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS wifi_credentials (
@@ -244,6 +338,11 @@ impl Database {
             CREATE TABLE IF NOT EXISTS role (
                 id   INTEGER PRIMARY KEY CHECK (id = 1),
                 role TEXT NOT NULL DEFAULT 'primary'
+            );
+            CREATE TABLE IF NOT EXISTS paired_peers (
+                endpoint_id   BLOB PRIMARY KEY,
+                friendly_name TEXT NOT NULL,
+                direction     TEXT NOT NULL
             );",
         )?;
 
@@ -275,6 +374,19 @@ fn bytes_to_secret(bytes: &[u8]) -> Result<SecretKey> {
         )
     })?;
     Ok(SecretKey::from_bytes(&arr))
+}
+
+fn bytes_to_endpoint_id(bytes: &[u8]) -> Result<EndpointId> {
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            bytes.len(),
+            rusqlite::types::Type::Blob,
+            format!("expected 32-byte endpoint id, got {} bytes", bytes.len()).into(),
+        )
+    })?;
+    EndpointId::from_bytes(&arr).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(32, rusqlite::types::Type::Blob, e.into())
+    })
 }
 
 /// Returns `$XDG_DATA_HOME/xyz.mooshq.GuestInfoDisplay`, falling back to

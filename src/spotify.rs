@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender, bounded};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use librespot::{
     connect::{ConnectConfig, Spirc},
     core::{Session, SessionConfig, SpotifyUri, authentication::Credentials, config::DeviceType},
@@ -17,7 +18,7 @@ use librespot::{
 };
 use tokio::task::JoinHandle;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SpotifyTrackInfo {
     pub uri: String,
     pub name: String,
@@ -33,7 +34,7 @@ impl SpotifyTrackInfo {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SpotifyState {
     pub current: Option<SpotifyTrackInfo>,
     /// Previously-played tracks, oldest first. Used to restore upcoming entries
@@ -51,6 +52,9 @@ pub struct CoverImage {
     pub width: u32,
     pub height: u32,
     pub bgra: Vec<u8>,
+    /// Original encoded JPEG/PNG bytes from Spotify's CDN, retained so primaries
+    /// can forward to subscribers over the wire without re-fetching.
+    pub encoded: Vec<u8>,
 }
 
 /// Single channel of Spotify updates to the UI. Executor-agnostic — safe to `recv()`
@@ -638,13 +642,14 @@ async fn kick_off_cover_fetch(
     let fetched = fetched.clone();
     tokio::spawn(async move {
         match fetch_cover(&session, &url).await {
-            Ok((width, height, bgra)) => {
+            Ok((width, height, bgra, encoded)) => {
                 let _ = tx
                     .send(Event::CoverLoaded(CoverImage {
                         url,
                         width,
                         height,
                         bgra,
+                        encoded,
                     }))
                     .await;
             }
@@ -660,14 +665,24 @@ async fn kick_off_cover_fetch(
 async fn fetch_cover(
     session: &Session,
     url: &str,
-) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(u32, u32, Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
     let req = http::Request::builder()
         .method("GET")
         .uri(url)
         .body(bytes::Bytes::new())?;
     let bytes = session.http_client().request_body(req).await?;
+    let encoded = bytes.to_vec();
+    let (w, h, bgra) = decode_cover_bytes(&bytes)?;
+    Ok((w, h, bgra, encoded))
+}
 
-    let img = image::load_from_memory(&bytes)?.into_rgba8();
+/// Decodes encoded JPEG/PNG bytes into BGRA pixels suitable for [`CoverImage`].
+/// Used both by the local cover-fetch path and by reflections receiving
+/// cover-art payloads over the wire.
+pub fn decode_cover_bytes(
+    encoded: &[u8],
+) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+    let img = image::load_from_memory(encoded)?.into_rgba8();
     let (w, h) = img.dimensions();
     let mut buf = img.into_raw();
     // GPUI's renderer expects BGRA; the `image` crate decodes to RGBA.

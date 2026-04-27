@@ -2,17 +2,21 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, SharedString, Window, prelude::*, px};
+use gpui::{App, IntoElement, SharedString, Window, div, hsla, prelude::*, px};
 use gpui_component::{
     IndexPath, WindowExt,
     button::{Button, ButtonVariants},
+    h_flex,
     input::{Input, InputState},
     radio::RadioGroup,
     select::{Select, SelectState},
     v_flex,
 };
+use iroh::EndpointId;
 
-use crate::persistence::{Role, WifiCredentials, WifiSecurity};
+use crate::persistence::{PairedPeer, Role, WifiCredentials, WifiSecurity};
+
+pub type OnPairFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
 
 /// Sentinel rendered as the first option in the audio device dropdown to mean
 /// "let cpal/rodio pick the system default each time."
@@ -31,13 +35,20 @@ pub type OnSaveFn = Arc<dyn Fn(DialogValues, &mut App) + 'static>;
 ///
 /// Pre-fills the form fields from the supplied values.
 /// `audio_devices` is the list of cpal output device names to offer.
+/// `discovered_primaries` and `paired_primary` drive the reflection-side
+/// discovery/pair section; both are ignored in primary role.
 /// `on_save` is called with the form values when the user confirms.
+/// `on_pair` is fired when the user clicks Pair next to a discovered primary.
+#[allow(clippy::too_many_arguments)]
 pub fn open(
     existing_wifi: Option<WifiCredentials>,
     existing_audio: Option<String>,
     existing_role: Role,
     audio_devices: Vec<String>,
+    discovered_primaries: Vec<EndpointId>,
+    paired_primary: Option<PairedPeer>,
     on_save: OnSaveFn,
+    on_pair: OnPairFn,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -107,6 +118,14 @@ pub fn open(
         let role_footer = role_state.clone();
         let on_save_footer = on_save.clone();
 
+        let pair_section = (existing_role == Role::Reflection).then(|| {
+            pairing_section(
+                discovered_primaries.clone(),
+                paired_primary.clone(),
+                on_pair.clone(),
+            )
+        });
+
         dialog
             .title("Settings")
             .w(px(420.))
@@ -153,7 +172,8 @@ pub fn open(
                             .gap_1()
                             .child("Audio output")
                             .child(Select::new(&audio_render)),
-                    ),
+                    )
+                    .when_some(pair_section, |el, section| el.child(section)),
             )
             .footer(move |_, _, _, _| {
                 let ssid = ssid_footer.clone();
@@ -205,4 +225,56 @@ pub fn open(
                 ]
             })
     });
+}
+
+fn pairing_section(
+    discovered: Vec<EndpointId>,
+    paired: Option<PairedPeer>,
+    on_pair: OnPairFn,
+) -> impl IntoElement {
+    let muted = hsla(0.0, 0.0, 1.0, 0.55);
+
+    v_flex().gap_2().child("Primary").child(if let Some(p) = paired {
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_color(muted)
+                    .child(format!("Paired with {}", p.friendly_name)),
+            )
+            .child(
+                div()
+                    .text_color(muted)
+                    .text_sm()
+                    .child(format!("{}", p.endpoint_id.fmt_short())),
+            )
+            .into_any_element()
+    } else if discovered.is_empty() {
+        div()
+            .text_color(muted)
+            .text_sm()
+            .child("Searching for primaries on this network…")
+            .into_any_element()
+    } else {
+        v_flex()
+            .gap_2()
+            .children(discovered.into_iter().map(|id| {
+                let on_pair = on_pair.clone();
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_3()
+                    .child(div().text_sm().child(format!("{}", id.fmt_short())))
+                    .child(
+                        Button::new(SharedString::from(format!("pair-{}", id.fmt_short())))
+                            .primary()
+                            .label("Pair")
+                            .on_click(move |_, window, cx| {
+                                on_pair(id, cx);
+                                window.close_dialog(cx);
+                            }),
+                    )
+            }))
+            .into_any_element()
+    })
 }
