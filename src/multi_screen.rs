@@ -73,6 +73,10 @@ enum Command {
         friendly_name: String,
         respond: AsyncSender<Option<PairingResponse>>,
     },
+    /// Drop any live subscriber stream pointing at this endpoint. Used when
+    /// the primary's user removes a reflection — the in-flight subscription
+    /// closes immediately rather than waiting for the next state change.
+    DisconnectSubscriber(EndpointId),
 }
 
 /// Hands the GPUI side a primary-mirroring backend that produces the same
@@ -96,11 +100,18 @@ impl Drop for ReflectionHandle {
 /// side (writes on approval / removal).
 type TrustState = Arc<Mutex<HashSet<EndpointId>>>;
 
+/// One live subscription. Tracked together so the primary can target a single
+/// reflection (e.g. on removal) without having to disambiguate by sender alone.
+pub(crate) struct Subscriber {
+    pub endpoint_id: EndpointId,
+    pub sender: IrpcSender<WireMessage>,
+}
+
 /// Subscriber-registry + snapshot cache shared between the service handler
 /// (adds new subscribers, replies to Subscribe with snapshot+covers) and the
 /// broadcast loop (updates the cache and fans live messages out).
 struct Shared {
-    subscribers: Mutex<Vec<IrpcSender<WireMessage>>>,
+    subscribers: Mutex<Vec<Subscriber>>,
     last_state: Mutex<SpotifyState>,
     /// Encoded JPEG/PNG bytes keyed by Spotify cover URL. Populated each time
     /// a primary fetches a cover; cleared on session reset.
@@ -180,6 +191,15 @@ impl MultiScreenHandle {
     pub fn remove_inbound_trusted(&self, id: EndpointId) {
         if let Ok(mut guard) = self.inbound_trusted.lock() {
             guard.remove(&id);
+        }
+    }
+
+    /// Drop any live subscriber stream pointing at `id`. Pair this with
+    /// [`remove_inbound_trusted`] when the user removes a reflection so the
+    /// stream closes immediately and the reflection can't reconnect.
+    pub fn disconnect_subscriber(&self, id: EndpointId) {
+        if self.cmd_tx.try_send(Command::DisconnectSubscriber(id)).is_err() {
+            log::warn!("multi_screen: command channel full — disconnect dropped");
         }
     }
 
@@ -312,8 +332,8 @@ impl MultiScreenRuntime {
 
         let shared = Shared::new(inbound_trusted);
         let router = build_router(endpoint.clone(), shared.clone(), approvals_tx).await;
-        tokio::spawn(broadcast_loop(broadcast_rx, shared));
-        tokio::spawn(command_loop(cmd_rx, endpoint));
+        tokio::spawn(broadcast_loop(broadcast_rx, shared.clone()));
+        tokio::spawn(command_loop(cmd_rx, endpoint, shared));
         if let Some(mdns) = mdns {
             tokio::spawn(discovery::run(mdns, discovered_tx));
         } else {
@@ -329,7 +349,7 @@ impl MultiScreenRuntime {
     }
 }
 
-async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint) {
+async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint, shared: Arc<Shared>) {
     while let Ok(cmd) = rx.recv().await {
         match cmd {
             Command::StartReflection {
@@ -361,6 +381,19 @@ async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint) {
                         .ok();
                     let _ = respond.send(result).await;
                 });
+            }
+            Command::DisconnectSubscriber(endpoint_id) => {
+                if let Ok(mut guard) = shared.subscribers.lock() {
+                    let before = guard.len();
+                    guard.retain(|s| s.endpoint_id != endpoint_id);
+                    let dropped = before - guard.len();
+                    if dropped > 0 {
+                        log::info!(
+                            "multi_screen: dropped {dropped} subscriber(s) for {}",
+                            endpoint_id.fmt_short()
+                        );
+                    }
+                }
             }
         }
     }
@@ -409,21 +442,24 @@ async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) 
             }
         };
 
-        let senders: Vec<IrpcSender<WireMessage>> = match shared.subscribers.lock() {
+        let subscribers: Vec<Subscriber> = match shared.subscribers.lock() {
             Ok(mut guard) => std::mem::take(&mut *guard),
             Err(_) => continue,
         };
 
-        let mut survivors = Vec::with_capacity(senders.len());
-        for sender in senders {
+        let mut survivors = Vec::with_capacity(subscribers.len());
+        for sub in subscribers {
             // try_send is non-blocking: returns immediately whether the
             // message was buffered or not, only erroring on closed channel.
             // That matches the spec's "drop slow subscribers" rule — they
             // reconnect for a fresh snapshot rather than wedge the broadcast.
-            match sender.try_send(wire.clone()).await {
-                Ok(_) => survivors.push(sender),
+            match sub.sender.try_send(wire.clone()).await {
+                Ok(_) => survivors.push(sub),
                 Err(e) => {
-                    log::debug!("multi_screen: dropping subscriber: {e:?}");
+                    log::debug!(
+                        "multi_screen: dropping subscriber {}: {e:?}",
+                        sub.endpoint_id.fmt_short()
+                    );
                 }
             }
         }

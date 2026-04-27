@@ -24,18 +24,23 @@ mod qr_code;
 mod settings_dialog;
 mod spotify;
 
+/// Whichever task tree is producing `(state, events)` for the GPUI consumer.
+/// Holding the appropriate variant keeps that backend alive; replacing it
+/// (e.g. on role switch) drops the previous handles and aborts their tasks.
+enum BackendHandle {
+    Primary(spotify::SpotifyHandle),
+    Reflection(multi_screen::ReflectionHandle),
+}
+
 struct GuestInfoDisplay {
     now: DateTime<Local>,
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
     role: persistence::Role,
-    /// `Some` while `role == Primary`; `None` when running as a reflection (no
-    /// librespot, no audio output). Dropped on role switch to tear the
-    /// discovery loop and rodio sink down.
-    spotify: Option<spotify::SpotifyHandle>,
-    /// `Some` while `role == Reflection` and a primary is paired. Holds the
-    /// dial loop that produces (state, events) for the GPUI consumer.
-    reflection: Option<multi_screen::ReflectionHandle>,
+    /// Active backend producing the spotify event stream. `None` when role is
+    /// reflection but no primary is paired yet — the UI shows the "Primary
+    /// unavailable" empty state in that case.
+    backend: Option<BackendHandle>,
     /// iroh endpoint + RPC service. Identity is symmetric across roles, so we
     /// keep one runtime alive for the lifetime of the model regardless of role.
     _multi_screen: multi_screen::MultiScreenHandle,
@@ -48,6 +53,10 @@ struct GuestInfoDisplay {
     queue: Vec<spotify::SpotifyTrackInfo>,
     covers: HashMap<String, Arc<RenderImage>>,
     is_playing: bool,
+    /// Reflection-only: tracks whether the active subscription has delivered
+    /// a snapshot recently. `false` after the session drops; flipped back to
+    /// `true` on the next snapshot. Always `true` in primary role.
+    connected: bool,
     inhibitor: inhibitor::Inhibitor,
     _clock_task: Task<()>,
     _spotify_task: Option<Task<()>>,
@@ -124,8 +133,7 @@ impl GuestInfoDisplay {
             db,
             wifi_creds,
             role,
-            spotify: None,
-            reflection: None,
+            backend: None,
             _multi_screen: multi_screen,
             pending_approvals: VecDeque::new(),
             discovered_primaries: HashSet::new(),
@@ -133,6 +141,7 @@ impl GuestInfoDisplay {
             queue: Vec::new(),
             covers: HashMap::new(),
             is_playing: false,
+            connected: true,
             inhibitor: inhibitor::Inhibitor::new(),
             _clock_task: clock_task,
             _spotify_task: None,
@@ -147,21 +156,24 @@ impl GuestInfoDisplay {
     /// `self.role` and the persisted audio-device selection. Called on role
     /// change, on audio-device change, and at startup.
     fn rebuild_backend(&mut self, cx: &mut Context<Self>) {
-        // Drop in-flight work first. Dropping the SpotifyHandle closes its
-        // shutdown channel which exits the discovery loop and releases the
-        // rodio output stream; dropping the GPUI task cancels the event
-        // listener so no late updates land in `self`.
+        // Drop in-flight work first. Dropping the BackendHandle closes the
+        // backend's shutdown channel — Primary exits the librespot discovery
+        // loop and releases the rodio sink; Reflection cancels the dial loop.
+        // Dropping the GPUI task cancels the event listener so no late updates
+        // land in `self`.
         self._spotify_task = None;
-        self.spotify = None;
-        self.reflection = None;
+        self.backend = None;
 
         self.current_track = None;
         self.queue.clear();
         self.covers.clear();
         self.is_playing = false;
+        // Primaries are always "connected" (they generate their own state).
+        // Reflections start disconnected and flip on the first snapshot.
+        self.connected = matches!(self.role, persistence::Role::Primary);
         self.inhibitor.set(false);
 
-        match self.role {
+        let new_backend = match self.role {
             persistence::Role::Primary => {
                 let device_id = self
                     .db
@@ -171,29 +183,30 @@ impl GuestInfoDisplay {
                     .db
                     .audio_device_name()
                     .expect("failed to load audio device name");
+                Some(BackendHandle::Primary(spotify::start(
+                    device_id,
+                    audio_device,
+                )))
+            }
+            persistence::Role::Reflection => self
+                .db
+                .paired_primary()
+                .ok()
+                .flatten()
+                .map(|primary| {
+                    BackendHandle::Reflection(
+                        self._multi_screen.start_reflection(primary.endpoint_id),
+                    )
+                }),
+        };
 
-                let handle = spotify::start(device_id, audio_device);
-                self._spotify_task = Some(spawn_spotify_task(
-                    handle.state.clone(),
-                    handle.events.clone(),
-                    cx,
-                ));
-                self.spotify = Some(handle);
-            }
-            persistence::Role::Reflection => {
-                if let Ok(Some(primary)) = self.db.paired_primary() {
-                    let handle = self._multi_screen.start_reflection(primary.endpoint_id);
-                    self._spotify_task = Some(spawn_spotify_task(
-                        handle.state.clone(),
-                        handle.events.clone(),
-                        cx,
-                    ));
-                    self.reflection = Some(handle);
-                }
-                // No paired primary yet: leave both fields empty. The render
-                // layer shows the default "Nothing playing" card; T13 lands a
-                // proper "Primary unavailable" empty state.
-            }
+        if let Some(backend) = new_backend {
+            let (state, events) = match &backend {
+                BackendHandle::Primary(h) => (h.state.clone(), h.events.clone()),
+                BackendHandle::Reflection(h) => (h.state.clone(), h.events.clone()),
+            };
+            self._spotify_task = Some(spawn_spotify_task(state, events, cx));
+            self.backend = Some(backend);
         }
 
         cx.notify();
@@ -231,6 +244,15 @@ fn spawn_spotify_task(
                         spotify::Event::CoversCleared => {
                             this._multi_screen.broadcast_covers_cleared();
                             this.covers.clear();
+                        }
+                        spotify::Event::ConnectionLost => {
+                            this.connected = false;
+                            // is_playing was already cleared via the
+                            // preceding StateChanged, which also released the
+                            // inhibit; nothing else to do here.
+                        }
+                        spotify::Event::ConnectionRestored => {
+                            this.connected = true;
                         }
                     }
                     cx.notify();
@@ -294,6 +316,9 @@ impl Render for GuestInfoDisplay {
         let surface_border = hsla(0.0, 0.0, 1.0, 0.12);
         let muted_text = hsla(0.0, 0.0, 1.0, 0.55);
 
+        let show_disconnected =
+            matches!(self.role, persistence::Role::Reflection) && !self.connected;
+
         div()
             .size_full()
             .relative()
@@ -345,7 +370,10 @@ impl Render for GuestInfoDisplay {
                             .gap_6()
                             .px_8()
                             .pb_2()
-                            .child(
+                            .child(if show_disconnected {
+                                disconnected_card(surface, surface_border, muted_text)
+                                    .into_any_element()
+                            } else {
                                 h_flex()
                                     .flex_1()
                                     .h_full()
@@ -466,8 +494,9 @@ impl Render for GuestInfoDisplay {
                                                         .child("—"),
                                                 )
                                             }),
-                                    ),
-                            )
+                                    )
+                                    .into_any_element()
+                            })
                             .child(
                                 v_flex()
                                     .w(px(320.))
@@ -529,8 +558,14 @@ impl Render for GuestInfoDisplay {
                                                     this.discovered_primaries.iter().copied().collect();
                                                 let paired_primary =
                                                     this.db.paired_primary().ok().flatten();
+                                                let paired_reflections = this
+                                                    .db
+                                                    .paired_peers(persistence::Direction::Inbound)
+                                                    .unwrap_or_default();
                                                 let entity = cx.entity().downgrade();
                                                 let entity_pair = entity.clone();
+                                                let entity_remove = entity.clone();
+                                                let entity_forget = entity.clone();
                                                 settings_dialog::SettingsDialog {
                                                     existing_wifi,
                                                     existing_audio,
@@ -538,6 +573,7 @@ impl Render for GuestInfoDisplay {
                                                     audio_devices,
                                                     discovered_primaries: discovered,
                                                     paired_primary,
+                                                    paired_reflections,
                                                     on_save: Arc::new(move |values, cx| {
                                                         entity
                                                             .update(cx, |this, cx| {
@@ -629,6 +665,37 @@ impl Render for GuestInfoDisplay {
                                                             .detach();
                                                         });
                                                     }),
+                                                    on_remove_reflection: Arc::new(move |id, cx| {
+                                                        let _ = entity_remove.update(cx, |this, cx| {
+                                                            if let Err(e) =
+                                                                this.db.remove_paired_peer(id)
+                                                            {
+                                                                log::warn!(
+                                                                    "remove reflection: persist failed: {e}"
+                                                                );
+                                                                return;
+                                                            }
+                                                            this._multi_screen.remove_inbound_trusted(id);
+                                                            this._multi_screen.disconnect_subscriber(id);
+                                                            cx.notify();
+                                                        });
+                                                    }),
+                                                    on_forget_primary: Arc::new(move |cx| {
+                                                        let _ = entity_forget.update(cx, |this, cx| {
+                                                            if let Ok(Some(p)) = this.db.paired_primary() {
+                                                                if let Err(e) = this
+                                                                    .db
+                                                                    .remove_paired_peer(p.endpoint_id)
+                                                                {
+                                                                    log::warn!(
+                                                                        "forget primary: persist failed: {e}"
+                                                                    );
+                                                                    return;
+                                                                }
+                                                            }
+                                                            this.rebuild_backend(cx);
+                                                        });
+                                                    }),
                                                     window,
                                                     cx,
                                                 }
@@ -655,6 +722,29 @@ impl Render for GuestInfoDisplay {
             })
             .children(dialog_layer)
     }
+}
+
+fn disconnected_card(
+    surface: gpui::Hsla,
+    surface_border: gpui::Hsla,
+    muted_text: gpui::Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .flex_1()
+        .h_full()
+        .rounded(px(16.))
+        .bg(surface)
+        .border_1()
+        .border_color(surface_border)
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_color(muted_text)
+                .text_2xl()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Primary unavailable"),
+        )
 }
 
 fn approval_overlay(

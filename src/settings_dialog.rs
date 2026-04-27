@@ -17,6 +17,8 @@ use iroh::EndpointId;
 use crate::persistence::{PairedPeer, Role, WifiCredentials, WifiSecurity};
 
 pub type OnPairFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
+pub type OnRemovePeerFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
+pub type OnForgetPrimaryFn = Arc<dyn Fn(&mut App) + 'static>;
 
 /// Sentinel rendered as the first option in the audio device dropdown to mean
 /// "let cpal/rodio pick the system default each time."
@@ -46,8 +48,13 @@ pub struct SettingsDialog<'a, 'b> {
     pub audio_devices: Vec<String>,
     pub discovered_primaries: Vec<EndpointId>,
     pub paired_primary: Option<PairedPeer>,
+    /// Inbound paired peers (this node is their primary). Rendered with a
+    /// Remove button on the primary view; ignored in reflection role.
+    pub paired_reflections: Vec<PairedPeer>,
     pub on_save: OnSaveFn,
     pub on_pair: OnPairFn,
+    pub on_remove_reflection: OnRemovePeerFn,
+    pub on_forget_primary: OnForgetPrimaryFn,
     pub window: &'a mut Window,
     pub cx: &'b mut App,
 }
@@ -61,8 +68,11 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             audio_devices,
             discovered_primaries,
             paired_primary,
+            paired_reflections,
             on_save,
             on_pair,
+            on_remove_reflection,
+            on_forget_primary,
             window,
             cx,
         } = self;
@@ -139,8 +149,12 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                     discovered_primaries.clone(),
                     paired_primary.clone(),
                     on_pair.clone(),
+                    on_forget_primary.clone(),
                 )
             });
+            let reflections_section = (existing_role == Role::Primary
+                && !paired_reflections.is_empty())
+            .then(|| reflections_section(paired_reflections.clone(), on_remove_reflection.clone()));
 
             dialog
                 .title("Settings")
@@ -189,7 +203,8 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                                 .child("Audio output")
                                 .child(Select::new(&audio_render)),
                         )
-                        .when_some(pair_section, |el, section| el.child(section)),
+                        .when_some(pair_section, |el, section| el.child(section))
+                        .when_some(reflections_section, |el, section| el.child(section)),
                 )
                 .footer(move |_, _, _, _| {
                     let ssid = ssid_footer.clone();
@@ -248,22 +263,38 @@ fn pairing_section(
     discovered: Vec<EndpointId>,
     paired: Option<PairedPeer>,
     on_pair: OnPairFn,
+    on_forget: OnForgetPrimaryFn,
 ) -> impl IntoElement {
     let muted = hsla(0.0, 0.0, 1.0, 0.55);
 
     v_flex().gap_2().child("Primary").child(if let Some(p) = paired {
         v_flex()
-            .gap_1()
+            .gap_2()
             .child(
-                div()
-                    .text_color(muted)
-                    .child(format!("Paired with {}", p.friendly_name)),
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .child(format!("Paired with {}", p.friendly_name)),
+                    )
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .text_sm()
+                            .child(format!("{}", p.endpoint_id.fmt_short())),
+                    ),
             )
             .child(
-                div()
-                    .text_color(muted)
-                    .text_sm()
-                    .child(format!("{}", p.endpoint_id.fmt_short())),
+                h_flex().justify_end().child(
+                    Button::new("forget-primary")
+                        .outline()
+                        .label("Forget")
+                        .on_click(move |_, window, cx| {
+                            on_forget(cx);
+                            window.close_dialog(cx);
+                        }),
+                ),
             )
             .into_any_element()
     } else if discovered.is_empty() {
@@ -294,4 +325,42 @@ fn pairing_section(
             }))
             .into_any_element()
     })
+}
+
+fn reflections_section(
+    peers: Vec<PairedPeer>,
+    on_remove: OnRemovePeerFn,
+) -> impl IntoElement {
+    let muted = hsla(0.0, 0.0, 1.0, 0.55);
+
+    v_flex()
+        .gap_2()
+        .child("Reflections")
+        .children(peers.into_iter().map(|peer| {
+            let on_remove = on_remove.clone();
+            let id = peer.endpoint_id;
+            h_flex()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .gap_0p5()
+                        .child(div().child(peer.friendly_name.clone()))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(format!("{}", id.fmt_short())),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("remove-{}", id.fmt_short())))
+                        .outline()
+                        .label("Remove")
+                        .on_click(move |_, _, cx| {
+                            on_remove(id, cx);
+                        }),
+                )
+        }))
 }

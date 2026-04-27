@@ -11,7 +11,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 
 use super::{
-    PendingApproval, Shared,
+    PendingApproval, Shared, Subscriber,
     proto::{DisplayMessage, PairingResponse, WireMessage},
 };
 
@@ -99,6 +99,7 @@ async fn handle_subscribe(
         }
     };
 
+    let endpoint_id = req.inner.endpoint_id;
     let tx = req.tx;
 
     if let Err(e) = tx.send(WireMessage::Snapshot(snapshot)).await {
@@ -113,6 +114,9 @@ async fn handle_subscribe(
     }
 
     if let Ok(mut guard) = shared.subscribers.lock() {
-        guard.push(tx);
+        guard.push(Subscriber {
+            endpoint_id,
+            sender: tx,
+        });
     }
 }

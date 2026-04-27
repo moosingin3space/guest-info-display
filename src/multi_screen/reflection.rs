@@ -51,13 +51,13 @@ pub async fn run(
             }
         }
 
-        // Clear local state so the GPUI side renders the disconnected card
-        // (the "Primary unavailable" UI lands in T13; for T9 just blank it).
+        // Clear local state so the GPUI side renders the disconnected card.
         if let Ok(mut guard) = state.lock() {
             *guard = SpotifyState::default();
         }
         let _ = events_tx.send(Event::StateChanged).await;
         let _ = events_tx.send(Event::CoversCleared).await;
+        let _ = events_tx.send(Event::ConnectionLost).await;
 
         tokio::select! {
             biased;
@@ -116,6 +116,7 @@ async fn run_session(
 
     log::info!("reflection: subscribed to primary {}", primary.fmt_short());
 
+    let mut connected = false;
     while let Some(msg) = rx.recv().await? {
         match msg {
             WireMessage::Snapshot(s) | WireMessage::StateChanged(s) => {
@@ -124,6 +125,12 @@ async fn run_session(
                 }
                 if events_tx.send(Event::StateChanged).await.is_err() {
                     return Ok(SessionEnd::ConsumerGone);
+                }
+                if !connected {
+                    connected = true;
+                    if events_tx.send(Event::ConnectionRestored).await.is_err() {
+                        return Ok(SessionEnd::ConsumerGone);
+                    }
                 }
             }
             WireMessage::CoverArt { url, encoded } => {

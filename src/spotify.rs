@@ -66,6 +66,11 @@ pub enum Event {
     CoverLoaded(CoverImage),
     /// Session ended — drop any cached artwork.
     CoversCleared,
+    /// Reflection-only: the multi-screen subscription dropped. The local backend
+    /// (librespot) never produces this; primaries always render their own state.
+    ConnectionLost,
+    /// Reflection-only: a fresh snapshot has been received from the primary.
+    ConnectionRestored,
 }
 
 pub struct SpotifyHandle {

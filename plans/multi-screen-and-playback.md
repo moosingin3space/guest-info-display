@@ -17,10 +17,10 @@ rationale; this document is the build sequence.
 | T8 — Primary handlers | ✅ landed |
 | T9 — Reflection ingest | ✅ landed |
 | T10 — Discovery + pairing | ✅ landed |
-| T11 — Peer management UI | ⏳ pending |
-| T12 — Role lifecycle (live) | 🟡 functional via T6–T10 — `rebuild_backend` swaps between `spotify::start` and `multi_screen::start_reflection` cleanly when role/audio device/paired primary change. The proposed `BackendHandle` enum consolidation is still optional cleanup. |
-| T13 — Disconnected UI | ⏳ pending |
-| T14 — Reflection inhibit | ⏳ pending |
+| T11 — Peer management UI | ✅ landed |
+| T12 — Role lifecycle (live) | ✅ landed — `rebuild_backend` now drives a single `Option<BackendHandle>` (Primary/Reflection variants) so role and audio-device changes swap cleanly through one supervisor. |
+| T13 — Disconnected UI | ✅ landed |
+| T14 — Reflection inhibit | ✅ landed — verified to flow through the existing `is_playing` path; reflection's wire state propagates into `inhibitor.set(sp.is_playing)` with no additional code. |
 | T15 — Flatpak manifest | ⏳ pending |
 | T16 — Docs | ⏳ pending |
 
