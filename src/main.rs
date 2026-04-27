@@ -14,6 +14,7 @@ use gpui_component::{
     h_flex, v_flex,
 };
 use image::{Frame, RgbaImage};
+use iroh::EndpointId;
 use smallvec::SmallVec;
 
 mod audio_devices;
@@ -37,6 +38,9 @@ struct GuestInfoDisplay {
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
     role: persistence::Role,
+    /// Stable iroh identity for this device. Surfaced in the UI so users can
+    /// recognize each instance when pairing primaries and reflections.
+    endpoint_id: EndpointId,
     /// Active backend producing the spotify event stream. `None` when role is
     /// reflection but no primary is paired yet — the UI shows the "Primary
     /// unavailable" empty state in that case.
@@ -71,7 +75,8 @@ impl GuestInfoDisplay {
         let role = db.role().expect("failed to load role");
 
         let secret = db.node_secret().expect("failed to load iroh identity");
-        log::debug!("multi_screen: EndpointId = {}", secret.public());
+        let endpoint_id = secret.public();
+        log::debug!("multi_screen: EndpointId = {endpoint_id}");
         let multi_screen = multi_screen::start(secret);
 
         // Seed the inbound trusted set from already-paired reflections so they
@@ -133,6 +138,7 @@ impl GuestInfoDisplay {
             db,
             wifi_creds,
             role,
+            endpoint_id,
             backend: None,
             _multi_screen: multi_screen,
             pending_approvals: VecDeque::new(),
@@ -711,10 +717,14 @@ impl Render for GuestInfoDisplay {
                             .text_sm()
                             .text_color(muted_text)
                             .text_center()
-                            .child(match self.role {
-                                persistence::Role::Primary => "Primary",
-                                persistence::Role::Reflection => "Reflection",
-                            }),
+                            .child(format!(
+                                "{} · {}",
+                                match self.role {
+                                    persistence::Role::Primary => "Primary",
+                                    persistence::Role::Reflection => "Reflection",
+                                },
+                                self.endpoint_id.fmt_short(),
+                            )),
                     ),
             )
             .when(!self.pending_approvals.is_empty(), |el| {
@@ -767,6 +777,7 @@ fn approval_overlay(
         .items_center()
         .justify_center()
         .bg(hsla(0.0, 0.0, 0.0, 0.55))
+        .text_color(white())
         .child(
             v_flex()
                 .gap_4()
@@ -776,6 +787,7 @@ fn approval_overlay(
                 .bg(rgb(0x1a1f3d))
                 .border_1()
                 .border_color(surface_border)
+                .text_color(white())
                 .child(
                     div()
                         .text_xl()

@@ -308,11 +308,13 @@ async fn handle_event(
         PlayerEvent::SetQueue {
             next_tracks,
             prev_tracks,
+            current_track,
             ..
         } => {
             HandleSetQueue {
                 next_tracks,
                 prev_tracks,
+                current_track,
                 session,
                 state,
                 tx,
@@ -407,6 +409,11 @@ fn navigate_to(
 struct HandleSetQueue<'a> {
     next_tracks: Vec<QueueTrack>,
     prev_tracks: Vec<QueueTrack>,
+    /// The track Spirc reports as currently playing. Spirc emits this on
+    /// transfer-with-song-in-progress *before* the player issues `Loading`
+    /// for the same track, so seeding `state.current` here means the cover
+    /// fetch can start without waiting for the player's load to complete.
+    current_track: Option<QueueTrack>,
     session: &'a Session,
     state: &'a SharedSpotifyState,
     tx: &'a Sender<Event>,
@@ -420,6 +427,7 @@ impl<'a> HandleSetQueue<'a> {
         let HandleSetQueue {
             next_tracks,
             prev_tracks,
+            current_track,
             session,
             state,
             tx,
@@ -429,9 +437,10 @@ impl<'a> HandleSetQueue<'a> {
         } = self;
 
         log::debug!(
-            "spotify: SetQueue: {} next, {} prev",
+            "spotify: SetQueue: {} next, {} prev, current = {:?}",
             next_tracks.len(),
             prev_tracks.len(),
+            current_track.as_ref().map(|t| &t.uri),
         );
 
         let next_uris: Vec<String> = next_tracks
@@ -444,15 +453,20 @@ impl<'a> HandleSetQueue<'a> {
             .filter(|t| !t.uri.is_empty())
             .map(|t| t.uri)
             .collect();
+        let current_uri: Option<String> = current_track
+            .map(|t| t.uri)
+            .filter(|u| !u.is_empty());
 
         // Synchronously hydrate the first few visible queue entries so the panel
         // never opens with raw `spotify:track:...` strings; the background task
         // below picks up the long tail.
-        prehydrate_visible(&next_uris, session, metadata_cache).await;
+        let mut prehydrate_uris: Vec<String> = current_uri.iter().cloned().collect();
+        prehydrate_uris.extend(next_uris.iter().cloned());
+        prehydrate_visible(&prehydrate_uris, session, metadata_cache).await;
 
         // Build placeholder/cached entries synchronously; actual hydration runs in
         // the background task spawned below so the UI never wedges on slow lookups.
-        let (queue, history, cached_cover_urls) = {
+        let (queue, history, current_info, mut cached_cover_urls) = {
             let cache = metadata_cache.lock().await;
             let make = |uri: &String| {
                 cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
@@ -464,12 +478,16 @@ impl<'a> HandleSetQueue<'a> {
             };
             let queue: Vec<_> = next_uris.iter().map(&make).collect();
             let history: Vec<_> = prev_uris.iter().map(&make).collect();
-            let urls: Vec<_> = queue
+            let current_info = current_uri.as_ref().map(&make);
+            let mut urls: Vec<_> = queue
                 .iter()
                 .chain(history.iter())
                 .filter_map(|t| t.cover_url.clone())
                 .collect();
-            (queue, history, urls)
+            if let Some(url) = current_info.as_ref().and_then(|t| t.cover_url.clone()) {
+                urls.push(url);
+            }
+            (queue, history, current_info, urls)
         };
 
         let changed = if let Ok(mut st) = state.lock() {
@@ -487,7 +505,24 @@ impl<'a> HandleSetQueue<'a> {
                     .any(|(a, b)| a.uri != b.uri);
             st.queue = queue;
             st.history = history;
-            queue_different || history_different
+
+            // Seed `current` from SetQueue only if we don't already have a
+            // matching one — this preserves any richer info already populated
+            // by a preceding `Loading` / `TrackChanged`. When the URIs differ,
+            // SetQueue is authoritative (e.g. transfer-with-song-in-progress
+            // before the local player has loaded the track).
+            let current_different = match (&st.current, &current_info) {
+                (None, Some(_)) => true,
+                (Some(cur), Some(new)) if cur.uri != new.uri => true,
+                _ => false,
+            };
+            if let Some(info) = current_info
+                && current_different
+            {
+                st.current = Some(info);
+            }
+
+            queue_different || history_different || current_different
         } else {
             false
         };
@@ -496,6 +531,10 @@ impl<'a> HandleSetQueue<'a> {
             let _ = tx.send(Event::StateChanged).await;
         }
 
+        // Drop any duplicate URLs so we don't hammer the dedupe set with
+        // identical no-op calls in a tight loop.
+        cached_cover_urls.sort();
+        cached_cover_urls.dedup();
         for url in cached_cover_urls {
             kick_off_cover_fetch(url, session, tx, fetched).await;
         }
@@ -507,8 +546,11 @@ impl<'a> HandleSetQueue<'a> {
         }
 
         // Hydrate upcoming tracks first (visible), then prev (only needed if the
-        // user hits "previous").
-        let mut to_hydrate = next_uris;
+        // user hits "previous"). Include the current track URI so a slow
+        // metadata lookup eventually populates its cover even when the
+        // synchronous prehydrate failed (e.g. session not fully warm yet).
+        let mut to_hydrate: Vec<String> = current_uri.into_iter().collect();
+        to_hydrate.extend(next_uris);
         to_hydrate.extend(prev_uris);
 
         *hydration_task = Some(tokio::spawn(hydrate_uris(
@@ -661,24 +703,37 @@ async fn kick_off_cover_fetch(
     let tx = tx.clone();
     let fetched = fetched.clone();
     tokio::spawn(async move {
-        match fetch_cover(&session, &url).await {
-            Ok((width, height, bgra, encoded)) => {
-                let _ = tx
-                    .send(Event::CoverLoaded(CoverImage {
-                        url,
-                        width,
-                        height,
-                        bgra,
-                        encoded,
-                    }))
-                    .await;
+        // Retry a few times with backoff: on first connect / transfer the
+        // session's HTTP client is occasionally not ready to talk to the
+        // Spotify CDN, and a one-shot fetch silently leaves the cover blank.
+        let mut delay = std::time::Duration::from_millis(500);
+        for attempt in 0..4 {
+            match fetch_cover(&session, &url).await {
+                Ok((width, height, bgra, encoded)) => {
+                    let _ = tx
+                        .send(Event::CoverLoaded(CoverImage {
+                            url,
+                            width,
+                            height,
+                            bgra,
+                            encoded,
+                        }))
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "spotify: cover fetch failed (attempt {}): {e}",
+                        attempt + 1,
+                    );
+                }
             }
-            Err(e) => {
-                log::debug!("spotify: cover fetch failed: {e}");
-                // Drop from dedupe set so a retry can happen on the next event.
-                fetched.lock().await.remove(&url);
-            }
+            tokio::time::sleep(delay).await;
+            delay *= 2;
         }
+        // Give up: drop from dedupe set so a later StateChanged-triggered
+        // call can take another swing.
+        fetched.lock().await.remove(&url);
     });
 }
 

@@ -144,7 +144,8 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             let role_footer = role_state.clone();
             let on_save_footer = on_save.clone();
 
-            let pair_section = (existing_role == Role::Reflection).then(|| {
+            let current_role = role_render.get();
+            let pair_section = (current_role == Role::Reflection).then(|| {
                 pairing_section(
                     discovered_primaries.clone(),
                     paired_primary.clone(),
@@ -152,7 +153,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                     on_forget_primary.clone(),
                 )
             });
-            let reflections_section = (existing_role == Role::Primary
+            let reflections_section = (current_role == Role::Primary
                 && !paired_reflections.is_empty())
             .then(|| reflections_section(paired_reflections.clone(), on_remove_reflection.clone()));
 
@@ -171,11 +172,17 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                                         Role::Reflection => 1,
                                     }))
                                     .children(["Primary", "Reflection"])
-                                    .on_click(move |ix, _, _| {
+                                    .on_click(move |ix, window, _| {
                                         role_handler.set(match *ix {
                                             0 => Role::Primary,
                                             _ => Role::Reflection,
                                         });
+                                        // Force the dialog builder to re-run so
+                                        // the radio's selected indicator and the
+                                        // role-conditional sections (pair /
+                                        // reflections) update without needing a
+                                        // dismiss-and-reopen.
+                                        window.refresh();
                                     }),
                             ),
                         )
