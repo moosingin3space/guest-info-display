@@ -257,15 +257,16 @@ pub fn start(secret_key: SecretKey) -> MultiScreenHandle {
                 .enable_all()
                 .build()
                 .expect("multi-screen tokio runtime");
-            rt.block_on(run(
+            rt.block_on(MultiScreenRuntime {
                 secret_key,
-                shutdown_rx,
+                shutdown: shutdown_rx,
                 broadcast_rx,
                 approvals_tx,
                 discovered_tx,
                 cmd_rx,
-                inbound_trusted_run,
-            ));
+                inbound_trusted: inbound_trusted_run,
+            }
+            .run());
         })
         .expect("multi-screen worker thread");
 
@@ -280,8 +281,7 @@ pub fn start(secret_key: SecretKey) -> MultiScreenHandle {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run(
+struct MultiScreenRuntime {
     secret_key: SecretKey,
     shutdown: oneshot::Receiver<()>,
     broadcast_rx: AsyncReceiver<BroadcastEvent>,
@@ -289,29 +289,43 @@ async fn run(
     discovered_tx: AsyncSender<DiscoveredNode>,
     cmd_rx: AsyncReceiver<Command>,
     inbound_trusted: TrustState,
-) {
-    let Some((endpoint, mdns)) = endpoint::build(secret_key).await else {
+}
+
+impl MultiScreenRuntime {
+    async fn run(self) {
+        let MultiScreenRuntime {
+            secret_key,
+            shutdown,
+            broadcast_rx,
+            approvals_tx,
+            discovered_tx,
+            cmd_rx,
+            inbound_trusted,
+        } = self;
+
+        let Some((endpoint, mdns)) = endpoint::build(secret_key).await else {
+            let _ = shutdown.await;
+            return;
+        };
+
+        log::info!("multi_screen: endpoint up, EndpointId = {}", endpoint.id());
+
+        let shared = Shared::new(inbound_trusted);
+        let router = build_router(endpoint.clone(), shared.clone(), approvals_tx).await;
+        tokio::spawn(broadcast_loop(broadcast_rx, shared));
+        tokio::spawn(command_loop(cmd_rx, endpoint));
+        if let Some(mdns) = mdns {
+            tokio::spawn(discovery::run(mdns, discovered_tx));
+        } else {
+            // Drop the sender so receivers close cleanly when no mDNS is available.
+            drop(discovered_tx);
+        }
+
         let _ = shutdown.await;
-        return;
-    };
-
-    log::info!("multi_screen: endpoint up, EndpointId = {}", endpoint.id());
-
-    let shared = Shared::new(inbound_trusted);
-    let router = build_router(endpoint.clone(), shared.clone(), approvals_tx).await;
-    tokio::spawn(broadcast_loop(broadcast_rx, shared));
-    tokio::spawn(command_loop(cmd_rx, endpoint));
-    if let Some(mdns) = mdns {
-        tokio::spawn(discovery::run(mdns, discovered_tx));
-    } else {
-        // Drop the sender so receivers close cleanly when no mDNS is available.
-        drop(discovered_tx);
-    }
-
-    let _ = shutdown.await;
-    log::info!("multi_screen: shutting down");
-    if let Err(e) = router.shutdown().await {
-        log::debug!("multi_screen: router shutdown error: {e}");
+        log::info!("multi_screen: shutting down");
+        if let Err(e) = router.shutdown().await {
+            log::debug!("multi_screen: router shutdown error: {e}");
+        }
     }
 }
 

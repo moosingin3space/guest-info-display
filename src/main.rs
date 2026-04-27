@@ -531,14 +531,14 @@ impl Render for GuestInfoDisplay {
                                                     this.db.paired_primary().ok().flatten();
                                                 let entity = cx.entity().downgrade();
                                                 let entity_pair = entity.clone();
-                                                settings_dialog::open(
+                                                settings_dialog::SettingsDialog {
                                                     existing_wifi,
                                                     existing_audio,
                                                     existing_role,
                                                     audio_devices,
-                                                    discovered,
+                                                    discovered_primaries: discovered,
                                                     paired_primary,
-                                                    Arc::new(move |values, cx| {
+                                                    on_save: Arc::new(move |values, cx| {
                                                         entity
                                                             .update(cx, |this, cx| {
                                                                 this.db
@@ -583,7 +583,7 @@ impl Render for GuestInfoDisplay {
                                                             })
                                                             .ok();
                                                     }),
-                                                    Arc::new(move |primary_id, cx| {
+                                                    on_pair: Arc::new(move |primary_id, cx| {
                                                         let _ = entity_pair.update(cx, |this, cx| {
                                                             let recv = this
                                                                 ._multi_screen
@@ -631,7 +631,8 @@ impl Render for GuestInfoDisplay {
                                                     }),
                                                     window,
                                                     cx,
-                                                );
+                                                }
+                                                .run();
                                             })),
                                     ),
                             ),

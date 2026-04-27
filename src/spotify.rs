@@ -305,7 +305,7 @@ async fn handle_event(
             prev_tracks,
             ..
         } => {
-            handle_set_queue(
+            HandleSetQueue {
                 next_tracks,
                 prev_tracks,
                 session,
@@ -314,7 +314,8 @@ async fn handle_event(
                 fetched,
                 metadata_cache,
                 hydration_task,
-            )
+            }
+            .execute()
             .await;
             // handle_set_queue sends its own StateChanged if needed.
             return;
@@ -398,108 +399,122 @@ fn navigate_to(
 
 /// Handle a `SetQueue` player event emitted by Spirc on context load and
 /// explicit queue mutations.
-#[allow(clippy::too_many_arguments)]
-async fn handle_set_queue(
+struct HandleSetQueue<'a> {
     next_tracks: Vec<QueueTrack>,
     prev_tracks: Vec<QueueTrack>,
-    session: &Session,
-    state: &SharedSpotifyState,
-    tx: &Sender<Event>,
-    fetched: &Arc<tokio::sync::Mutex<HashSet<String>>>,
-    metadata_cache: &Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
-    hydration_task: &mut Option<JoinHandle<()>>,
-) {
-    log::debug!(
-        "spotify: SetQueue: {} next, {} prev",
-        next_tracks.len(),
-        prev_tracks.len(),
-    );
+    session: &'a Session,
+    state: &'a SharedSpotifyState,
+    tx: &'a Sender<Event>,
+    fetched: &'a Arc<tokio::sync::Mutex<HashSet<String>>>,
+    metadata_cache: &'a Arc<tokio::sync::Mutex<HashMap<String, SpotifyTrackInfo>>>,
+    hydration_task: &'a mut Option<JoinHandle<()>>,
+}
 
-    let next_uris: Vec<String> = next_tracks
-        .into_iter()
-        .filter(|t| !t.uri.is_empty())
-        .map(|t| t.uri)
-        .collect();
-    let prev_uris: Vec<String> = prev_tracks
-        .into_iter()
-        .filter(|t| !t.uri.is_empty())
-        .map(|t| t.uri)
-        .collect();
+impl<'a> HandleSetQueue<'a> {
+    async fn execute(self) {
+        let HandleSetQueue {
+            next_tracks,
+            prev_tracks,
+            session,
+            state,
+            tx,
+            fetched,
+            metadata_cache,
+            hydration_task,
+        } = self;
 
-    // Synchronously hydrate the first few visible queue entries so the panel
-    // never opens with raw `spotify:track:...` strings; the background task
-    // below picks up the long tail.
-    prehydrate_visible(&next_uris, session, metadata_cache).await;
+        log::debug!(
+            "spotify: SetQueue: {} next, {} prev",
+            next_tracks.len(),
+            prev_tracks.len(),
+        );
 
-    // Build placeholder/cached entries synchronously; actual hydration runs in
-    // the background task spawned below so the UI never wedges on slow lookups.
-    let (queue, history, cached_cover_urls) = {
-        let cache = metadata_cache.lock().await;
-        let make = |uri: &String| {
-            cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
-                uri: uri.clone(),
-                name: uri.clone(),
-                artists: String::new(),
-                cover_url: None,
-            })
-        };
-        let queue: Vec<_> = next_uris.iter().map(&make).collect();
-        let history: Vec<_> = prev_uris.iter().map(&make).collect();
-        let urls: Vec<_> = queue
-            .iter()
-            .chain(history.iter())
-            .filter_map(|t| t.cover_url.clone())
+        let next_uris: Vec<String> = next_tracks
+            .into_iter()
+            .filter(|t| !t.uri.is_empty())
+            .map(|t| t.uri)
             .collect();
-        (queue, history, urls)
-    };
+        let prev_uris: Vec<String> = prev_tracks
+            .into_iter()
+            .filter(|t| !t.uri.is_empty())
+            .map(|t| t.uri)
+            .collect();
 
-    let changed = if let Ok(mut st) = state.lock() {
-        let queue_different = st.queue.len() != queue.len()
-            || st
-                .queue
+        // Synchronously hydrate the first few visible queue entries so the panel
+        // never opens with raw `spotify:track:...` strings; the background task
+        // below picks up the long tail.
+        prehydrate_visible(&next_uris, session, metadata_cache).await;
+
+        // Build placeholder/cached entries synchronously; actual hydration runs in
+        // the background task spawned below so the UI never wedges on slow lookups.
+        let (queue, history, cached_cover_urls) = {
+            let cache = metadata_cache.lock().await;
+            let make = |uri: &String| {
+                cache.get(uri).cloned().unwrap_or_else(|| SpotifyTrackInfo {
+                    uri: uri.clone(),
+                    name: uri.clone(),
+                    artists: String::new(),
+                    cover_url: None,
+                })
+            };
+            let queue: Vec<_> = next_uris.iter().map(&make).collect();
+            let history: Vec<_> = prev_uris.iter().map(&make).collect();
+            let urls: Vec<_> = queue
                 .iter()
-                .zip(queue.iter())
-                .any(|(a, b)| a.uri != b.uri);
-        let history_different = st.history.len() != history.len()
-            || st
-                .history
-                .iter()
-                .zip(history.iter())
-                .any(|(a, b)| a.uri != b.uri);
-        st.queue = queue;
-        st.history = history;
-        queue_different || history_different
-    } else {
-        false
-    };
+                .chain(history.iter())
+                .filter_map(|t| t.cover_url.clone())
+                .collect();
+            (queue, history, urls)
+        };
 
-    if changed {
-        let _ = tx.send(Event::StateChanged).await;
+        let changed = if let Ok(mut st) = state.lock() {
+            let queue_different = st.queue.len() != queue.len()
+                || st
+                    .queue
+                    .iter()
+                    .zip(queue.iter())
+                    .any(|(a, b)| a.uri != b.uri);
+            let history_different = st.history.len() != history.len()
+                || st
+                    .history
+                    .iter()
+                    .zip(history.iter())
+                    .any(|(a, b)| a.uri != b.uri);
+            st.queue = queue;
+            st.history = history;
+            queue_different || history_different
+        } else {
+            false
+        };
+
+        if changed {
+            let _ = tx.send(Event::StateChanged).await;
+        }
+
+        for url in cached_cover_urls {
+            kick_off_cover_fetch(url, session, tx, fetched).await;
+        }
+
+        // Cancel any in-flight hydration before queuing the new pass — its URIs
+        // may no longer be present after this SetQueue.
+        if let Some(h) = hydration_task.take() {
+            h.abort();
+        }
+
+        // Hydrate upcoming tracks first (visible), then prev (only needed if the
+        // user hits "previous").
+        let mut to_hydrate = next_uris;
+        to_hydrate.extend(prev_uris);
+
+        *hydration_task = Some(tokio::spawn(hydrate_uris(
+            to_hydrate,
+            session.clone(),
+            state.clone(),
+            tx.clone(),
+            fetched.clone(),
+            metadata_cache.clone(),
+        )));
     }
-
-    for url in cached_cover_urls {
-        kick_off_cover_fetch(url, session, tx, fetched).await;
-    }
-
-    // Cancel any in-flight hydration before queuing the new pass — its URIs
-    // may no longer be present after this SetQueue.
-    if let Some(h) = hydration_task.take() {
-        h.abort();
-    }
-
-    // Hydrate upcoming tracks first (visible), then prev (only needed if the
-    // user hits "previous").
-    let mut to_hydrate = next_uris;
-    to_hydrate.extend(prev_uris);
-
-    *hydration_task = Some(tokio::spawn(hydrate_uris(
-        to_hydrate,
-        session.clone(),
-        state.clone(),
-        tx.clone(),
-        fetched.clone(),
-        metadata_cache.clone(),
-    )));
 }
 
 /// Number of upcoming tracks shown in the UI; we hydrate at least this many
