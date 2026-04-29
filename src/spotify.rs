@@ -82,6 +82,12 @@ pub struct SpotifyHandle {
     _shutdown: Sender<()>,
 }
 
+/// Spotify Connect display name. Includes the device-id so multiple instances
+/// on the same network are distinguishable in the Spotify "Devices" picker.
+fn display_name(device_id: &str) -> String {
+    format!("Guest Info Display ({device_id})")
+}
+
 pub fn start(device_id: String, audio_device: Option<String>) -> SpotifyHandle {
     let state: SharedSpotifyState = Arc::new(Mutex::new(SpotifyState::default()));
     let (tx, rx) = bounded::<Event>(16);
@@ -122,8 +128,8 @@ async fn discovery_loop(
     };
     let client_id = session_config.client_id.clone();
 
-    let mut discovery = match Discovery::builder(device_id, client_id)
-        .name("Guest Info Display")
+    let mut discovery = match Discovery::builder(device_id.clone(), client_id)
+        .name(display_name(&device_id))
         .device_type(DeviceType::Computer)
         .launch()
     {
@@ -182,6 +188,7 @@ async fn run_session(
     state: SharedSpotifyState,
     tx: Sender<Event>,
 ) -> Result<(), librespot::core::Error> {
+    let display_name = display_name(&session_config.device_id);
     let session = Session::new(session_config, None);
     // Do NOT call session.connect() here — Spirc::new() does it internally
     // after registering dealer listeners; connecting early causes a double-connect.
@@ -205,7 +212,7 @@ async fn run_session(
     let mut event_rx = player.get_player_event_channel();
 
     let connect_config = ConnectConfig {
-        name: "Guest Info Display".to_string(),
+        name: display_name,
         device_type: DeviceType::Computer,
         emit_set_queue_events: true,
         ..ConnectConfig::default()

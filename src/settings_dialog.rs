@@ -1,8 +1,9 @@
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, IntoElement, SharedString, Window, div, hsla, prelude::*, px};
+use gpui::{App, Entity, IntoElement, SharedString, Window, div, hsla, prelude::*, px};
 use gpui_component::{
     IndexPath, WindowExt,
     button::{Button, ButtonVariants},
@@ -15,6 +16,17 @@ use gpui_component::{
 use iroh::EndpointId;
 
 use crate::persistence::{PairedPeer, Role, WifiCredentials, WifiSecurity};
+
+/// Live data the settings dialog reads while open. Held in a sub-entity of
+/// `GuestInfoDisplay` so the dialog builder (which runs during the parent's
+/// render and therefore can't reach back into it) can read fresh state on
+/// every frame, and so that mutation paths funnel through `pairing.update`
+/// without runtime-checked interior mutability.
+pub struct PairingState {
+    pub paired_primary: Option<PairedPeer>,
+    pub paired_reflections: Vec<PairedPeer>,
+    pub discovered_primaries: HashSet<EndpointId>,
+}
 
 pub type OnPairFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
 pub type OnRemovePeerFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
@@ -37,8 +49,9 @@ pub type OnSaveFn = Arc<dyn Fn(DialogValues, &mut App) + 'static>;
 ///
 /// Pre-fills the form fields from the supplied values.
 /// `audio_devices` is the list of cpal output device names to offer.
-/// `discovered_primaries` and `paired_primary` drive the reflection-side
-/// discovery/pair section; both are ignored in primary role.
+/// `pairing` carries the live discovery / paired-peer state; the dialog
+/// builder re-reads it on every frame so peer-affecting actions (pair,
+/// approval, remove, forget) update the visible content in place.
 /// `on_save` is called with the form values when the user confirms.
 /// `on_pair` is fired when the user clicks Pair next to a discovered primary.
 pub struct SettingsDialog<'a, 'b> {
@@ -46,11 +59,7 @@ pub struct SettingsDialog<'a, 'b> {
     pub existing_audio: Option<String>,
     pub existing_role: Role,
     pub audio_devices: Vec<String>,
-    pub discovered_primaries: Vec<EndpointId>,
-    pub paired_primary: Option<PairedPeer>,
-    /// Inbound paired peers (this node is their primary). Rendered with a
-    /// Remove button on the primary view; ignored in reflection role.
-    pub paired_reflections: Vec<PairedPeer>,
+    pub pairing: Entity<PairingState>,
     pub on_save: OnSaveFn,
     pub on_pair: OnPairFn,
     pub on_remove_reflection: OnRemovePeerFn,
@@ -66,9 +75,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             existing_audio,
             existing_role,
             audio_devices,
-            discovered_primaries,
-            paired_primary,
-            paired_reflections,
+            pairing,
             on_save,
             on_pair,
             on_remove_reflection,
@@ -128,7 +135,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
         // can write the new selection that the Save button reads.
         let role_state = Rc::new(Cell::new(existing_role));
 
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let ssid_render = ssid_input.clone();
             let pwd_render = password_input.clone();
             let sec_render = security_select.clone();
@@ -145,17 +152,31 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             let on_save_footer = on_save.clone();
 
             let current_role = role_render.get();
+            // Reading `pairing` here registers it as a render-time dependency;
+            // any `pairing.update(cx, …)` from a callback (pair, approval,
+            // remove, forget, discovery) automatically re-runs this builder.
+            let (paired_primary_now, paired_reflections_now, discovered_sorted) = {
+                let s = pairing.read(cx);
+                let mut discovered: Vec<EndpointId> =
+                    s.discovered_primaries.iter().copied().collect();
+                discovered.sort_by_key(|id| id.fmt_short().to_string());
+                (
+                    s.paired_primary.clone(),
+                    s.paired_reflections.clone(),
+                    discovered,
+                )
+            };
             let pair_section = (current_role == Role::Reflection).then(|| {
                 pairing_section(
-                    discovered_primaries.clone(),
-                    paired_primary.clone(),
+                    discovered_sorted,
+                    paired_primary_now,
                     on_pair.clone(),
                     on_forget_primary.clone(),
                 )
             });
             let reflections_section = (current_role == Role::Primary
-                && !paired_reflections.is_empty())
-            .then(|| reflections_section(paired_reflections.clone(), on_remove_reflection.clone()));
+                && !paired_reflections_now.is_empty())
+            .then(|| reflections_section(paired_reflections_now, on_remove_reflection.clone()));
 
             dialog
                 .title("Settings")
@@ -275,33 +296,28 @@ fn pairing_section(
     let muted = hsla(0.0, 0.0, 1.0, 0.55);
 
     v_flex().gap_2().child("Primary").child(if let Some(p) = paired {
-        v_flex()
-            .gap_2()
+        h_flex()
+            .justify_between()
+            .items_center()
+            .gap_3()
             .child(
                 v_flex()
-                    .gap_1()
+                    .gap_0p5()
+                    .child(div().child("Paired with"))
                     .child(
                         div()
-                            .text_color(muted)
-                            .child(format!("Paired with {}", p.friendly_name)),
-                    )
-                    .child(
-                        div()
-                            .text_color(muted)
                             .text_sm()
+                            .text_color(muted)
                             .child(format!("{}", p.endpoint_id.fmt_short())),
                     ),
             )
             .child(
-                h_flex().justify_end().child(
-                    Button::new("forget-primary")
-                        .outline()
-                        .label("Forget")
-                        .on_click(move |_, window, cx| {
-                            on_forget(cx);
-                            window.close_dialog(cx);
-                        }),
-                ),
+                Button::new("forget-primary")
+                    .outline()
+                    .label("Forget")
+                    .on_click(move |_, _, cx| {
+                        on_forget(cx);
+                    }),
             )
             .into_any_element()
     } else if discovered.is_empty() {
@@ -324,9 +340,8 @@ fn pairing_section(
                         Button::new(SharedString::from(format!("pair-{}", id.fmt_short())))
                             .primary()
                             .label("Pair")
-                            .on_click(move |_, window, cx| {
+                            .on_click(move |_, _, cx| {
                                 on_pair(id, cx);
-                                window.close_dialog(cx);
                             }),
                     )
             }))
