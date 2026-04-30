@@ -38,6 +38,7 @@ struct GuestInfoDisplay {
     db: persistence::Database,
     wifi_creds: Option<persistence::WifiCredentials>,
     role: persistence::Role,
+    hide_titlebar: bool,
     /// Stable iroh identity for this device. Surfaced in the UI so users can
     /// recognize each instance when pairing primaries and reflections.
     endpoint_id: EndpointId,
@@ -77,6 +78,7 @@ impl GuestInfoDisplay {
         let db = persistence::Database::open().expect("failed to open settings database");
         let wifi_creds = db.wifi_credentials().ok().flatten();
         let role = db.role().expect("failed to load role");
+        let hide_titlebar = db.hide_titlebar().unwrap_or(false);
 
         let secret = db.node_secret().expect("failed to load iroh identity");
         let endpoint_id = secret.public();
@@ -152,6 +154,7 @@ impl GuestInfoDisplay {
             db,
             wifi_creds,
             role,
+            hide_titlebar,
             endpoint_id,
             backend: None,
             _multi_screen: multi_screen,
@@ -345,17 +348,19 @@ impl Render for GuestInfoDisplay {
                         linear_color_stop(rgb(0x0a1033), 0.0),
                         linear_color_stop(rgb(0x3b1d6e), 1.0),
                     ))
-                    .child(
-                        TitleBar::new().child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .text_color(black())
-                                .border_2()
-                                .child("Guest Info Display"),
-                        ),
-                    )
+                    .when(!self.hide_titlebar, |el| {
+                        el.child(
+                            TitleBar::new().child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .text_color(black())
+                                    .border_2()
+                                    .child("Guest Info Display"),
+                            ),
+                        )
+                    })
                     .child(
                         h_flex()
                             .w_full()
@@ -566,6 +571,7 @@ impl Render for GuestInfoDisplay {
                                                 let existing_audio =
                                                     this.db.audio_device_name().ok().flatten();
                                                 let existing_role = this.role;
+                                                let existing_hide_titlebar = this.hide_titlebar;
                                                 let audio_devices =
                                                     audio_devices::output_device_names();
                                                 let pairing = this.pairing.clone();
@@ -580,6 +586,7 @@ impl Render for GuestInfoDisplay {
                                                     existing_wifi,
                                                     existing_audio,
                                                     existing_role,
+                                                    existing_hide_titlebar,
                                                     audio_devices,
                                                     pairing,
                                                     on_save: Arc::new(move |values, cx| {
@@ -617,6 +624,18 @@ impl Render for GuestInfoDisplay {
                                                                                 .as_deref(),
                                                                         )
                                                                         .ok();
+                                                                }
+
+                                                                if values.hide_titlebar
+                                                                    != this.hide_titlebar
+                                                                {
+                                                                    this.db
+                                                                        .set_hide_titlebar(
+                                                                            values.hide_titlebar,
+                                                                        )
+                                                                        .ok();
+                                                                    this.hide_titlebar =
+                                                                        values.hide_titlebar;
                                                                 }
 
                                                                 if role_changed || audio_changed {

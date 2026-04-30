@@ -268,6 +268,29 @@ impl Database {
         Ok(())
     }
 
+    /// Whether the GPUI titlebar should be suppressed. Used to hide it under
+    /// kiosk / gamescope where the host doesn't auto-hide on fullscreen.
+    pub fn hide_titlebar(&self) -> Result<bool> {
+        match self.conn.query_row(
+            "SELECT hide_titlebar FROM app_prefs WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(v) => Ok(v != 0),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_hide_titlebar(&self, hide: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_prefs (id, hide_titlebar) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET hide_titlebar = excluded.hide_titlebar",
+            params![hide as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn add_paired_peer(
         &self,
         endpoint_id: EndpointId,
@@ -343,6 +366,10 @@ impl Database {
                 endpoint_id   BLOB PRIMARY KEY,
                 friendly_name TEXT NOT NULL,
                 direction     TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_prefs (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                hide_titlebar  INTEGER NOT NULL DEFAULT 0
             );",
         )?;
 

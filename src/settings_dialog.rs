@@ -11,6 +11,7 @@ use gpui_component::{
     input::{Input, InputState},
     radio::RadioGroup,
     select::{Select, SelectState},
+    switch::Switch,
     v_flex,
 };
 use iroh::EndpointId;
@@ -41,6 +42,7 @@ pub struct DialogValues {
     /// Selected output device name, or `None` when "System default" is chosen.
     pub audio_device: Option<String>,
     pub role: Role,
+    pub hide_titlebar: bool,
 }
 
 pub type OnSaveFn = Arc<dyn Fn(DialogValues, &mut App) + 'static>;
@@ -58,6 +60,7 @@ pub struct SettingsDialog<'a, 'b> {
     pub existing_wifi: Option<WifiCredentials>,
     pub existing_audio: Option<String>,
     pub existing_role: Role,
+    pub existing_hide_titlebar: bool,
     pub audio_devices: Vec<String>,
     pub pairing: Entity<PairingState>,
     pub on_save: OnSaveFn,
@@ -74,6 +77,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             existing_wifi,
             existing_audio,
             existing_role,
+            existing_hide_titlebar,
             audio_devices,
             pairing,
             on_save,
@@ -134,6 +138,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
         // element), so we pin it through an `Rc<Cell<_>>` so the on_click handler
         // can write the new selection that the Save button reads.
         let role_state = Rc::new(Cell::new(existing_role));
+        let hide_titlebar_state = Rc::new(Cell::new(existing_hide_titlebar));
 
         window.open_dialog(cx, move |dialog, _, cx| {
             let ssid_render = ssid_input.clone();
@@ -142,6 +147,8 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             let audio_render = audio_select.clone();
             let role_render = role_state.clone();
             let role_handler = role_state.clone();
+            let hide_titlebar_render = hide_titlebar_state.clone();
+            let hide_titlebar_handler = hide_titlebar_state.clone();
 
             let ssid_footer = ssid_input.clone();
             let pwd_footer = password_input.clone();
@@ -149,6 +156,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
             let audio_footer = audio_select.clone();
             let audio_options_footer = audio_options_for_lookup.clone();
             let role_footer = role_state.clone();
+            let hide_titlebar_footer = hide_titlebar_state.clone();
             let on_save_footer = on_save.clone();
 
             let current_role = role_render.get();
@@ -231,6 +239,15 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                                 .child("Audio output")
                                 .child(Select::new(&audio_render)),
                         )
+                        .child(
+                            Switch::new("hide-titlebar")
+                                .label("Hide titlebar")
+                                .checked(hide_titlebar_render.get())
+                                .on_click(move |checked, window, _| {
+                                    hide_titlebar_handler.set(*checked);
+                                    window.refresh();
+                                }),
+                        )
                         .when_some(pair_section, |el, section| el.child(section))
                         .when_some(reflections_section, |el, section| el.child(section)),
                 )
@@ -241,6 +258,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                     let audio = audio_footer.clone();
                     let audio_options = audio_options_footer.clone();
                     let role = role_footer.clone();
+                    let hide_titlebar = hide_titlebar_footer.clone();
                     let on_save = on_save_footer.clone();
 
                     vec![
@@ -275,6 +293,7 @@ impl<'a, 'b> SettingsDialog<'a, 'b> {
                                         },
                                         audio_device: audio_val,
                                         role: role.get(),
+                                        hide_titlebar: hide_titlebar.get(),
                                     },
                                     cx,
                                 );
