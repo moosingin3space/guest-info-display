@@ -8,9 +8,11 @@
   "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
   "finish-args": [
     "--share=ipc",
+    "--share=network",
     "--device=dri",
     "--socket=fallback-x11",
-    "--socket=wayland"
+    "--socket=wayland",
+    "--socket=pulseaudio"
   ],
   "modules": [
     {
