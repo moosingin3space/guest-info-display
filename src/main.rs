@@ -90,8 +90,7 @@ impl GuestInfoDisplay {
             .unwrap_or_default();
         // Seed the inbound trusted set from already-paired reflections so they
         // can subscribe right after startup.
-        let inbound_ids: HashSet<_> =
-            inbound_paired.iter().map(|p| p.endpoint_id).collect();
+        let inbound_ids: HashSet<_> = inbound_paired.iter().map(|p| p.endpoint_id).collect();
         multi_screen.seed_inbound_trusted(inbound_ids);
 
         let outbound_primary = db.paired_primary().ok().flatten();
@@ -309,8 +308,31 @@ fn build_render_image(cover: &spotify::CoverImage) -> Option<Arc<RenderImage>> {
     ))))
 }
 
+/// Width the layout was originally tuned for. The Pi-class panels we ship to
+/// run around this; anything wider scales up proportionally.
+const DESIGN_WIDTH: f32 = 1280.0;
+/// Cap so 4K monitors don't blow up to absurd sizes.
+const MAX_UI_SCALE: f32 = 1.75;
+const BASE_REM_SIZE: f32 = 16.0;
+
+fn ui_scale(window: &Window) -> f32 {
+    // Use physical pixel width so HiDPI panels (scale_factor > 1) also count as
+    // "larger" — viewport_size() reports logical pixels, which already hides
+    // the extra resolution from us.
+    let logical_width = f32::from(window.viewport_size().width);
+    let physical_width = logical_width * window.scale_factor();
+    (physical_width / DESIGN_WIDTH).clamp(1.0, MAX_UI_SCALE)
+}
+
 impl Render for GuestInfoDisplay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Scale the whole UI up on larger-than-design monitors. Setting rem_size
+        // here overrides what `Root::render` set from the theme; it scales every
+        // text_* and tailwind spacing utility used below. Fixed `px(...)` sizes
+        // still need explicit `* scale` multiplication.
+        let scale = ui_scale(window);
+        window.set_rem_size(px(BASE_REM_SIZE * scale));
+
         // Important: the dialog layer must be rendered, or else dialogs will not spawn.
         let dialog_layer = Root::render_dialog_layer(window, cx);
 
@@ -431,7 +453,7 @@ impl Render for GuestInfoDisplay {
                                                             .and_then(|url| self.covers.get(url))
                                                             .cloned();
                                                         let container = div()
-                                                            .size(px(220.))
+                                                            .size(px(220. * scale))
                                                             .rounded(px(12.))
                                                             .overflow_hidden();
                                                         if let Some(image) = cover {
@@ -479,7 +501,7 @@ impl Render for GuestInfoDisplay {
                                     )
                                     .child(
                                         v_flex()
-                                            .w(px(280.))
+                                            .w(px(280. * scale))
                                             .h_full()
                                             .gap_4()
                                             .child(
@@ -518,7 +540,7 @@ impl Render for GuestInfoDisplay {
                             })
                             .child(
                                 v_flex()
-                                    .w(px(320.))
+                                    .w(px(320. * scale))
                                     .h_full()
                                     .rounded(px(16.))
                                     .bg(surface)
@@ -540,7 +562,7 @@ impl Render for GuestInfoDisplay {
                                             )
                                             .child({
                                                 let container = div()
-                                                    .size(px(220.))
+                                                    .size(px(220. * scale))
                                                     .rounded(px(12.))
                                                     .overflow_hidden();
                                                 if let Some(ref creds) = self.wifi_creds {
@@ -769,7 +791,7 @@ impl Render for GuestInfoDisplay {
                     ),
             )
             .when(!self.pending_approvals.is_empty(), |el| {
-                el.child(approval_overlay(self, cx, surface_border, muted_text))
+                el.child(approval_overlay(self, cx, surface_border, muted_text, scale))
             })
             .children(dialog_layer)
     }
@@ -803,6 +825,7 @@ fn approval_overlay(
     cx: &mut Context<GuestInfoDisplay>,
     surface_border: gpui::Hsla,
     muted_text: gpui::Hsla,
+    scale: f32,
 ) -> impl IntoElement {
     let approval = this
         .pending_approvals
@@ -823,7 +846,7 @@ fn approval_overlay(
             v_flex()
                 .gap_4()
                 .p_8()
-                .w(px(420.))
+                .w(px(420. * scale))
                 .rounded(px(16.))
                 .bg(rgb(0x1a1f3d))
                 .border_1()
@@ -875,11 +898,13 @@ fn approval_overlay(
                                             state
                                                 .paired_reflections
                                                 .retain(|p| p.endpoint_id != endpoint_id);
-                                            state.paired_reflections.push(persistence::PairedPeer {
-                                                endpoint_id,
-                                                friendly_name,
-                                                direction: persistence::Direction::Inbound,
-                                            });
+                                            state.paired_reflections.push(
+                                                persistence::PairedPeer {
+                                                    endpoint_id,
+                                                    friendly_name,
+                                                    direction: persistence::Direction::Inbound,
+                                                },
+                                            );
                                             cx.notify();
                                         });
                                     }
