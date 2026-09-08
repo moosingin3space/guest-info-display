@@ -17,7 +17,7 @@ http = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 iroh = { version = "0.98", features = ["address-lookup-mdns"] }
 irpc = { version = "0.14", features = ["derive", "rpc"] }
-irpc-iroh = "0.14"
+irpc-iroh = "0.17"
 librespot = { git = "https://github.com/librespot-org/librespot", features = ["rodio-backend"] }
 log = "0.4.29"
 pretty_env_logger = "0.5.0"
