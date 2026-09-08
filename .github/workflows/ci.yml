@@ -37,7 +37,7 @@ jobs:
       - name: Build and test
         uses: wolfi-dev/wolfi-act@40fdf41723cf735906da3d534f0a3b6f5da2a8c4 # main
         with:
-          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22
+          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22,openssl-dev
           command: |
             export CARGO_HOME=/work/.cargo-home
             cargo build --release
@@ -56,7 +56,7 @@ jobs:
       - name: Verify generated-sources.json matches Cargo.lock
         uses: wolfi-dev/wolfi-act@40fdf41723cf735906da3d534f0a3b6f5da2a8c4 # main
         with:
-          packages: python-3.13,py3-aiohttp,py3-tomlkit,curl
+          packages: python-3.13,py3-aiohttp,py3-tomlkit,curl,git
           command: |
             curl -fsSL \
               "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py" \
