@@ -37,7 +37,7 @@ jobs:
       - name: Build and test
         uses: wolfi-dev/wolfi-act@40fdf41723cf735906da3d534f0a3b6f5da2a8c4 # main
         with:
-          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22,openssl-dev
+          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22,openssl-dev,alsa-lib-dev,fontconfig-dev,freetype-dev
           command: |
             export CARGO_HOME=/work/.cargo-home
             cargo build --release
@@ -89,6 +89,8 @@ jobs:
         with:
           bundle: guest-info-display.flatpak
           manifest-path: xyz.mooshq.GuestInfoDisplay.json
+          cache: true
+          restore-cache: true
           cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
 
       - name: Upload Flatpak bundle
