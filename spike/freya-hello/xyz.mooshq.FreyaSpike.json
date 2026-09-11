@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/flatpak/flatpak-builder/main/data/flatpak-manifest.schema.json",
+  "id": "xyz.mooshq.FreyaSpike",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "25.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "freya-hello",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "finish-args": [
+    "--share=ipc",
+    "--device=dri",
+    "--socket=fallback-x11",
+    "--socket=wayland"
+  ],
+  "modules": [
+    {
+      "name": "app",
+      "buildsystem": "simple",
+      "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "env": {
+          "CARGO_HOME": "/run/build/app/cargo",
+          "CARGO_NET_OFFLINE": "true",
+          "SKIA_BINARIES_URL": "file:///run/build/app/skia-binaries.tar.gz"
+        }
+      },
+      "build-commands": [
+        "cargo --offline fetch --manifest-path Cargo.toml --verbose",
+        "cargo build --offline --release",
+        "install -Dm0755 target/release/freya-hello -t ${FLATPAK_DEST}/bin/"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "./",
+          "skip": ["target", ".flatpak-builder", "build-dir", "repo"]
+        },
+        "generated-sources.json",
+        {
+          "type": "file",
+          "only-arches": ["x86_64"],
+          "url": "https://github.com/marc2332/rust-skia/releases/download/0.98.1/skia-binaries-b5756d8613bf27909a64-x86_64-unknown-linux-gnu-egl-gl-jpegd-jpege-svg-textlayout-vulkan-wayland-webpd-webpe-x11.tar.gz",
+          "sha256": "6a70402b54dac8647a0b4f914ff437298a55eb8de0d6c6357521296817e44dc6",
+          "dest-filename": "skia-binaries.tar.gz"
+        },
+        {
+          "type": "file",
+          "only-arches": ["aarch64"],
+          "url": "https://github.com/marc2332/rust-skia/releases/download/0.98.1/skia-binaries-b5756d8613bf27909a64-aarch64-unknown-linux-gnu-egl-gl-jpegd-jpege-svg-textlayout-vulkan-wayland-webpd-webpe-x11.tar.gz",
+          "sha256": "103e1d19d7de6f58736f7e2aea091efb6264f26e1ed38205746724ab9002a84e",
+          "dest-filename": "skia-binaries.tar.gz"
+        }
+      ]
+    }
+  ]
+}
