@@ -1,0 +1,18 @@
+[package]
+name = "freya-hello"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone: not part of the main crate's build.
+[workspace]
+
+[dependencies]
+# Pinned exactly: the Skia prebuilt in the Flatpak manifest is keyed to the
+# freya-skia-bindings version this resolves to.
+freya = "=0.4.3"
+# Not used directly. Present only to turn on `no-compile`, so a prebuilt key
+# mismatch panics instead of silently building Skia from source.
+# default-features = false so this entry adds no features to the key.
+freya-skia-bindings = { version = "=0.98.1", default-features = false, features = ["no-compile"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
