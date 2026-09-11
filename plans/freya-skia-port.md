@@ -322,6 +322,64 @@ Incidental findings:
 - `org.flatpak.Builder` has a private `/tmp`, so `--state-dir` and the build
   dir must live under `$HOME`.
 
+## Port results
+
+Ported 2026-09-10, straight after the spike. GPUI, `gpui-component`,
+`image`, `smallvec` and `build.rs` are gone.
+
+**Verified on x86_64** in the 25.08 SDK under waypuppet (headless Wayland):
+
+- The main view matches the GPUI layout: header, gradient, cards, cover
+  placeholder, Wi-Fi card, gear button and footer.
+- At 1920 px wide the UI scales 1.5× as intended.
+- Settings flow: typed an SSID and password, toggled "Hide titlebar", and
+  saved. Rows landed in SQLite, the Wi-Fi QR appeared (drawn with Skia
+  canvas calls), and the decorations went away live.
+- The app starts without panics, and `cargo test` passes.
+
+**Risks from the list above, resolved:**
+
+1. *UI scaling* — retired, and without the feared "× scale on every
+   line". freya-winit exposes a per-window `set_user_zoom`, reachable
+   through `Platform::post_callback`. `use_ui_zoom` sets it from the
+   physical window width, so layout code uses plain design sizes, as with
+   GPUI's `rem_size`. It also scales the built-in components, which the
+   rem trick never reached.
+2. *Dialog* — `Popup` + `PopupTitle`/`PopupContent`/`PopupButtons` cover
+   both the settings dialog and the pairing approval. No hand-rolled
+   overlay was needed.
+3. *Live decoration toggling* — works:
+   `Platform::with_window(None, |w| w.set_decorations(..))`. The initial
+   value is read before launch.
+
+**New gotchas found during the port:**
+
+- `ashpd`'s default `tokio` feature turns on `zbus/tokio` process-wide.
+  Freya's own zbus users (mundy's theme/accent watcher, AT-SPI) run on
+  threads with no Tokio runtime and panic with "no reactor running". Use
+  `ashpd` with `default-features = false, features = ["async-io", ...]`.
+- `spawn` ties a task to the calling component's scope. Tasks started from
+  the settings dialog (backend rebuild, pairing) would die when it closes,
+  so they use `spawn_forever`.
+- `SvgViewer` doesn't rasterize until it has a color, so set `.color(..)`
+  explicitly.
+- Gradient angles run opposite to CSS: `0°` is top → bottom.
+- Adwaita Mono isn't in the freedesktop runtime. Inside the Flatpak it
+  resolves only through the host's fonts, as it did under GPUI.
+
+**Not yet verified:**
+
+- aarch64 (see the spike results).
+- Real Spotify playback and cover art through `ImageViewer`, which needs a
+  Connect client on the network.
+- Multi-screen pairing end to end.
+- Pointer input on a real compositor. waypuppet's synthetic clicks never
+  produced a press in any Freya app, including a bare one-button test app,
+  while keyboard activation worked. That points at the harness, but it
+  needs one manual click-through on real hardware.
+- The CI "Build and test" job's package list (`mesa-dev`, `wayland-dev`,
+  `libstdc++-dev`), which has not been run.
+
 ## References
 
 - Freya: <https://freyaui.dev/> · <https://github.com/marc2332/freya>
