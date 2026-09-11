@@ -1,41 +1,26 @@
-use std::cell::Cell;
 use std::collections::HashSet;
-use std::rc::Rc;
-use std::sync::Arc;
 
-use gpui::{App, Entity, IntoElement, SharedString, Window, div, hsla, prelude::*, px};
-use gpui_component::{
-    IndexPath, WindowExt,
-    button::{Button, ButtonVariants},
-    h_flex,
-    input::{Input, InputState},
-    radio::RadioGroup,
-    select::{Select, SelectState},
-    switch::Switch,
-    v_flex,
-};
+use freya::prelude::*;
 use iroh::EndpointId;
 
+use crate::Model;
+use crate::audio_devices;
 use crate::persistence::{PairedPeer, Role, WifiCredentials, WifiSecurity};
 
-/// Live data the settings dialog reads while open. Held in a sub-entity of
-/// `GuestInfoDisplay` so the dialog builder (which runs during the parent's
-/// render and therefore can't reach back into it) can read fresh state on
-/// every frame, and so that mutation paths funnel through `pairing.update`
-/// without runtime-checked interior mutability.
+/// Live discovery + paired-peer state surfaced to the settings dialog. Part of
+/// the root [`Model`], so the dialog re-renders whenever pairing, approval,
+/// remove, forget or discovery touches it.
 pub struct PairingState {
     pub paired_primary: Option<PairedPeer>,
     pub paired_reflections: Vec<PairedPeer>,
     pub discovered_primaries: HashSet<EndpointId>,
 }
 
-pub type OnPairFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
-pub type OnRemovePeerFn = Arc<dyn Fn(EndpointId, &mut App) + 'static>;
-pub type OnForgetPrimaryFn = Arc<dyn Fn(&mut App) + 'static>;
-
 /// Sentinel rendered as the first option in the audio device dropdown to mean
 /// "let cpal/rodio pick the system default each time."
 const SYSTEM_DEFAULT: &str = "System default";
+
+const MUTED: (u8, u8, u8, u8) = (255, 255, 255, 140);
 
 pub struct DialogValues {
     pub wifi: WifiCredentials,
@@ -45,363 +30,309 @@ pub struct DialogValues {
     pub hide_titlebar: bool,
 }
 
-pub type OnSaveFn = Arc<dyn Fn(DialogValues, &mut App) + 'static>;
-
-/// Opens the settings dialog.
-///
-/// Pre-fills the form fields from the supplied values.
-/// `audio_devices` is the list of cpal output device names to offer.
-/// `pairing` carries the live discovery / paired-peer state; the dialog
-/// builder re-reads it on every frame so peer-affecting actions (pair,
-/// approval, remove, forget) update the visible content in place.
-/// `on_save` is called with the form values when the user confirms.
-/// `on_pair` is fired when the user clicks Pair next to a discovered primary.
-pub struct SettingsDialog<'a, 'b> {
-    pub existing_wifi: Option<WifiCredentials>,
-    pub existing_audio: Option<String>,
-    pub existing_role: Role,
-    pub existing_hide_titlebar: bool,
-    pub audio_devices: Vec<String>,
-    pub pairing: Entity<PairingState>,
-    pub on_save: OnSaveFn,
-    pub on_pair: OnPairFn,
-    pub on_remove_reflection: OnRemovePeerFn,
-    pub on_forget_primary: OnForgetPrimaryFn,
-    pub window: &'a mut Window,
-    pub cx: &'b mut App,
+/// The settings form. Render it inside a `Popup` only while `open` is true:
+/// form fields are seeded from the model when this component mounts, and
+/// closing the popup unmounts it, so reopening starts from the saved values.
+/// Pairing actions apply immediately; everything else waits for Save.
+#[derive(PartialEq)]
+pub struct SettingsDialog {
+    pub model: State<Model>,
+    pub open: State<bool>,
 }
 
-impl<'a, 'b> SettingsDialog<'a, 'b> {
-    pub fn run(self) {
-        let SettingsDialog {
-            existing_wifi,
-            existing_audio,
-            existing_role,
-            existing_hide_titlebar,
-            audio_devices,
-            pairing,
-            on_save,
-            on_pair,
-            on_remove_reflection,
-            on_forget_primary,
-            window,
-            cx,
-        } = self;
+impl Component for SettingsDialog {
+    fn render(&self) -> impl IntoElement {
+        let model = self.model;
+        let open = self.open;
+        let platform = Platform::get();
 
-        let ssid_input = cx.new(|cx| {
-            let state = InputState::new(window, cx).placeholder("MyNetwork");
-            if let Some(ref creds) = existing_wifi {
-                state.default_value(creds.ssid.clone())
-            } else {
-                state
-            }
+        let ssid = use_state(|| {
+            model
+                .peek()
+                .wifi_creds
+                .as_ref()
+                .map(|c| c.ssid.clone())
+                .unwrap_or_default()
         });
-
-        let password_input = cx.new(|cx| {
-            let state = InputState::new(window, cx).masked(true);
-            if let Some(ref creds) = existing_wifi {
-                state.default_value(creds.password.clone())
-            } else {
-                state
-            }
+        let password = use_state(|| {
+            model
+                .peek()
+                .wifi_creds
+                .as_ref()
+                .map(|c| c.password.clone())
+                .unwrap_or_default()
         });
+        let mut security = use_state(|| {
+            model
+                .peek()
+                .wifi_creds
+                .as_ref()
+                .map(|c| c.security.clone())
+                .unwrap_or(WifiSecurity::Wpa)
+        });
+        let audio_devices = use_hook(audio_devices::output_device_names);
+        let mut audio_device = use_state(|| model.peek().db.audio_device_name().ok().flatten());
+        let mut role = use_state(|| model.peek().role);
+        let mut hide_titlebar = use_state(|| model.peek().hide_titlebar);
+        let mut show_password = use_state(|| false);
 
-        let initial_idx = match existing_wifi.as_ref().map(|c| &c.security) {
-            Some(WifiSecurity::None) => IndexPath::new(1),
-            _ => IndexPath::new(0),
-        };
-        let security_select = cx.new(|cx| {
-            SelectState::new(
-                vec!["WPA", "Open (no password)"],
-                Some(initial_idx),
-                window,
-                cx,
+        let current_role = *role.read();
+        let (paired_primary, paired_reflections, discovered) = {
+            let m = model.read();
+            let mut discovered: Vec<EndpointId> =
+                m.pairing.discovered_primaries.iter().copied().collect();
+            discovered.sort_by_key(|id| id.fmt_short().to_string());
+            (
+                m.pairing.paired_primary.clone(),
+                m.pairing.paired_reflections.clone(),
+                discovered,
             )
-        });
-
-        // Audio device list: System default + every cpal output device, in order.
-        let audio_options: Vec<SharedString> = std::iter::once(SharedString::from(SYSTEM_DEFAULT))
-            .chain(audio_devices.into_iter().map(SharedString::from))
-            .collect();
-        let audio_initial_idx = match existing_audio.as_deref() {
-            None => Some(IndexPath::new(0)),
-            Some(name) => audio_options
-                .iter()
-                .position(|opt| opt.as_ref() == name)
-                .map(IndexPath::new),
         };
-        let audio_options_for_lookup = audio_options.clone();
-        let audio_select =
-            cx.new(|cx| SelectState::new(audio_options, audio_initial_idx, window, cx));
 
-        // Role isn't backed by a stateful entity (RadioGroup is a render-only
-        // element), so we pin it through an `Rc<Cell<_>>` so the on_click handler
-        // can write the new selection that the Save button reads.
-        let role_state = Rc::new(Cell::new(existing_role));
-        let hide_titlebar_state = Rc::new(Cell::new(existing_hide_titlebar));
+        let role_tile = |value: Role, text: &'static str| {
+            Tile::new()
+                .on_select(move |_| role.set(value))
+                .child(RadioItem::new().selected(current_role == value))
+                .child(text)
+        };
 
-        window.open_dialog(cx, move |dialog, _, cx| {
-            let ssid_render = ssid_input.clone();
-            let pwd_render = password_input.clone();
-            let sec_render = security_select.clone();
-            let audio_render = audio_select.clone();
-            let role_render = role_state.clone();
-            let role_handler = role_state.clone();
-            let hide_titlebar_render = hide_titlebar_state.clone();
-            let hide_titlebar_handler = hide_titlebar_state.clone();
+        let security_options = [
+            ("WPA", WifiSecurity::Wpa),
+            ("Open (no password)", WifiSecurity::None),
+        ];
+        let current_security = security.read().clone();
+        let security_label = security_options
+            .iter()
+            .find(|(_, s)| *s == current_security)
+            .map(|(name, _)| *name)
+            .unwrap_or("WPA");
 
-            let ssid_footer = ssid_input.clone();
-            let pwd_footer = password_input.clone();
-            let sec_footer = security_select.clone();
-            let audio_footer = audio_select.clone();
-            let audio_options_footer = audio_options_for_lookup.clone();
-            let role_footer = role_state.clone();
-            let hide_titlebar_footer = hide_titlebar_state.clone();
-            let on_save_footer = on_save.clone();
+        let current_audio = audio_device.read().clone();
+        let audio_label = current_audio
+            .clone()
+            .unwrap_or_else(|| SYSTEM_DEFAULT.to_string());
+        let audio_options: Vec<Option<String>> = std::iter::once(None)
+            .chain(audio_devices.iter().cloned().map(Some))
+            .collect();
 
-            let current_role = role_render.get();
-            // Reading `pairing` here registers it as a render-time dependency;
-            // any `pairing.update(cx, …)` from a callback (pair, approval,
-            // remove, forget, discovery) automatically re-runs this builder.
-            let (paired_primary_now, paired_reflections_now, discovered_sorted) = {
-                let s = pairing.read(cx);
-                let mut discovered: Vec<EndpointId> =
-                    s.discovered_primaries.iter().copied().collect();
-                discovered.sort_by_key(|id| id.fmt_short().to_string());
-                (
-                    s.paired_primary.clone(),
-                    s.paired_reflections.clone(),
-                    discovered,
-                )
-            };
-            let pair_section = (current_role == Role::Reflection).then(|| {
-                pairing_section(
-                    discovered_sorted,
-                    paired_primary_now,
-                    on_pair.clone(),
-                    on_forget_primary.clone(),
-                )
-            });
-            let reflections_section = (current_role == Role::Primary
-                && !paired_reflections_now.is_empty())
-            .then(|| reflections_section(paired_reflections_now, on_remove_reflection.clone()));
+        let show = *show_password.read();
 
-            dialog
-                .title("Settings")
-                .w(px(420.))
-                .child(
-                    v_flex()
-                        .gap_4()
-                        .py_2()
-                        .child(
-                            v_flex().gap_1().child("Role").child(
-                                RadioGroup::horizontal("role")
-                                    .selected_index(Some(match role_render.get() {
-                                        Role::Primary => 0,
-                                        Role::Reflection => 1,
-                                    }))
-                                    .children(["Primary", "Reflection"])
-                                    .on_click(move |ix, window, _| {
-                                        role_handler.set(match *ix {
-                                            0 => Role::Primary,
-                                            _ => Role::Reflection,
-                                        });
-                                        // Force the dialog builder to re-run so
-                                        // the radio's selected indicator and the
-                                        // role-conditional sections (pair /
-                                        // reflections) update without needing a
-                                        // dismiss-and-reopen.
-                                        window.refresh();
-                                    }),
-                            ),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child("Network name (SSID)")
-                                .child(Input::new(&ssid_render)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child("Password")
-                                .child(Input::new(&pwd_render).mask_toggle()),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child("Security type")
-                                .child(Select::new(&sec_render)),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child("Audio output")
-                                .child(Select::new(&audio_render)),
-                        )
-                        .child(
-                            Switch::new("hide-titlebar")
-                                .label("Hide titlebar")
-                                .checked(hide_titlebar_render.get())
-                                .on_click(move |checked, window, _| {
-                                    hide_titlebar_handler.set(*checked);
-                                    window.refresh();
-                                }),
-                        )
-                        .when_some(pair_section, |el, section| el.child(section))
-                        .when_some(reflections_section, |el, section| el.child(section)),
-                )
-                .footer(move |_, _, _, _| {
-                    let ssid = ssid_footer.clone();
-                    let password = pwd_footer.clone();
-                    let security = sec_footer.clone();
-                    let audio = audio_footer.clone();
-                    let audio_options = audio_options_footer.clone();
-                    let role = role_footer.clone();
-                    let hide_titlebar = hide_titlebar_footer.clone();
-                    let on_save = on_save_footer.clone();
+        let form = rect()
+            .width(Size::fill())
+            .spacing(16.)
+            .child(field(
+                "Role",
+                rect()
+                    .horizontal()
+                    .child(role_tile(Role::Primary, "Primary"))
+                    .child(role_tile(Role::Reflection, "Reflection")),
+            ))
+            .child(field(
+                "Network name (SSID)",
+                Input::new(ssid).placeholder("MyNetwork").width(Size::fill()),
+            ))
+            .child(field(
+                "Password",
+                Input::new(password)
+                    .width(Size::fill())
+                    .mode(if show {
+                        InputMode::Shown
+                    } else {
+                        InputMode::new_password()
+                    })
+                    .trailing(
+                        Button::new()
+                            .flat()
+                            .compact()
+                            .on_press(move |_| show_password.toggle())
+                            .child(if show { "Hide" } else { "Show" }),
+                    ),
+            ))
+            .child(field(
+                "Security type",
+                Select::new()
+                    .selected_item(security_label)
+                    .children(security_options.iter().map(|(name, value)| {
+                        let value = value.clone();
+                        MenuItem::new()
+                            .selected(value == current_security)
+                            .on_press(move |_| security.set(value.clone()))
+                            .child(*name)
+                            .into()
+                    })),
+            ))
+            .child(field(
+                "Audio output",
+                Select::new()
+                    .selected_item(audio_label)
+                    .children(audio_options.into_iter().map(|option| {
+                        let text = option
+                            .clone()
+                            .unwrap_or_else(|| SYSTEM_DEFAULT.to_string());
+                        MenuItem::new()
+                            .selected(option == current_audio)
+                            .on_press(move |_| audio_device.set(option.clone()))
+                            .child(text)
+                            .into()
+                    })),
+            ))
+            .child(
+                rect()
+                    .horizontal()
+                    .spacing(12.)
+                    .cross_align(Alignment::Center)
+                    .child(
+                        Switch::new()
+                            .toggled(hide_titlebar)
+                            .on_toggle(move |_| hide_titlebar.toggle()),
+                    )
+                    .child("Hide titlebar"),
+            )
+            .maybe_child((current_role == Role::Reflection).then(|| {
+                pairing_section(model, discovered, paired_primary)
+            }))
+            .maybe_child(
+                (current_role == Role::Primary && !paired_reflections.is_empty())
+                    .then(|| reflections_section(model, paired_reflections)),
+            );
 
-                    vec![
-                        Button::new("cancel")
-                            .outline()
-                            .label("Cancel")
-                            .on_click(|_, window, cx| window.close_dialog(cx))
-                            .into_any_element(),
-                        Button::new("save")
-                            .primary()
-                            .label("Save")
-                            .on_click(move |_, window, cx| {
-                                let ssid_val = ssid.read(cx).value().to_string();
-                                let pwd_val = password.read(cx).value().to_string();
-                                let sec_val =
-                                    match security.read(cx).selected_index(cx).map(|ix| ix.row) {
-                                        Some(1) => WifiSecurity::None,
-                                        _ => WifiSecurity::Wpa,
-                                    };
-                                let audio_val = audio
-                                    .read(cx)
-                                    .selected_index(cx)
-                                    .and_then(|ix| audio_options.get(ix.row))
-                                    .filter(|name| name.as_ref() != SYSTEM_DEFAULT)
-                                    .map(|name| name.to_string());
-                                on_save(
-                                    DialogValues {
-                                        wifi: WifiCredentials {
-                                            ssid: ssid_val,
-                                            password: pwd_val,
-                                            security: sec_val,
-                                        },
-                                        audio_device: audio_val,
-                                        role: role.get(),
-                                        hide_titlebar: hide_titlebar.get(),
-                                    },
-                                    cx,
-                                );
-                                window.close_dialog(cx);
-                            })
-                            .into_any_element(),
-                    ]
-                })
-        });
+        let cancel = Button::new()
+            .outline()
+            .on_press(move |_| {
+                let mut open = open;
+                open.set(false);
+            })
+            .child("Cancel");
+
+        let save = Button::new()
+            .filled()
+            .on_press(move |_| {
+                // A remembered device that has since disappeared falls back
+                // to the system default rather than being written back.
+                let audio_device = audio_device
+                    .read()
+                    .clone()
+                    .filter(|name| audio_devices.contains(name));
+                crate::save_settings(
+                    model,
+                    DialogValues {
+                        wifi: WifiCredentials {
+                            ssid: ssid.read().clone(),
+                            password: password.read().clone(),
+                            security: security.read().clone(),
+                        },
+                        audio_device,
+                        role: *role.read(),
+                        hide_titlebar: *hide_titlebar.read(),
+                    },
+                    &platform,
+                );
+                let mut open = open;
+                open.set(false);
+            })
+            .child("Save");
+
+        rect()
+            .width(Size::fill())
+            .child(PopupTitle::new("Settings".to_string()))
+            .child(PopupContent::new().child(form))
+            .child(PopupButtons::new().child(cancel).child(save))
     }
 }
 
-fn pairing_section(
-    discovered: Vec<EndpointId>,
-    paired: Option<PairedPeer>,
-    on_pair: OnPairFn,
-    on_forget: OnForgetPrimaryFn,
-) -> impl IntoElement {
-    let muted = hsla(0.0, 0.0, 1.0, 0.55);
-
-    v_flex().gap_2().child("Primary").child(if let Some(p) = paired {
-        h_flex()
-            .justify_between()
-            .items_center()
-            .gap_3()
-            .child(
-                v_flex()
-                    .gap_0p5()
-                    .child(div().child("Paired with"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(muted)
-                            .child(format!("{}", p.endpoint_id.fmt_short())),
-                    ),
-            )
-            .child(
-                Button::new("forget-primary")
-                    .outline()
-                    .label("Forget")
-                    .on_click(move |_, _, cx| {
-                        on_forget(cx);
-                    }),
-            )
-            .into_any_element()
-    } else if discovered.is_empty() {
-        div()
-            .text_color(muted)
-            .text_sm()
-            .child("Searching for primaries on this network…")
-            .into_any_element()
-    } else {
-        v_flex()
-            .gap_2()
-            .children(discovered.into_iter().map(|id| {
-                let on_pair = on_pair.clone();
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap_3()
-                    .child(div().text_sm().child(format!("{}", id.fmt_short())))
-                    .child(
-                        Button::new(SharedString::from(format!("pair-{}", id.fmt_short())))
-                            .primary()
-                            .label("Pair")
-                            .on_click(move |_, _, cx| {
-                                on_pair(id, cx);
-                            }),
-                    )
-            }))
-            .into_any_element()
-    })
+fn field(title: &'static str, control: impl Into<Element>) -> Rect {
+    rect()
+        .width(Size::fill())
+        .spacing(4.)
+        .child(title)
+        .child(control)
 }
 
-fn reflections_section(
-    peers: Vec<PairedPeer>,
-    on_remove: OnRemovePeerFn,
-) -> impl IntoElement {
-    let muted = hsla(0.0, 0.0, 1.0, 0.55);
+fn pairing_section(
+    model: State<Model>,
+    discovered: Vec<EndpointId>,
+    paired: Option<PairedPeer>,
+) -> Rect {
+    let body: Element = if let Some(p) = paired {
+        peer_row(
+            "Paired with".to_string(),
+            p.endpoint_id,
+            Button::new()
+                .outline()
+                .on_press(move |_| crate::forget_primary(model))
+                .child("Forget"),
+        )
+        .into()
+    } else if discovered.is_empty() {
+        label()
+            .color(MUTED)
+            .font_size(13.)
+            .text("Searching for primaries on this network…")
+            .into()
+    } else {
+        rect()
+            .width(Size::fill())
+            .spacing(8.)
+            .children(discovered.into_iter().map(|id| {
+                rect()
+                    .horizontal()
+                    .width(Size::fill())
+                    .main_align(Alignment::SpaceBetween)
+                    .cross_align(Alignment::Center)
+                    .child(label().font_size(13.).text(id.fmt_short().to_string()))
+                    .child(
+                        Button::new()
+                            .filled()
+                            .on_press(move |_| crate::pair_with(model, id))
+                            .child("Pair"),
+                    )
+                    .into()
+            }))
+            .into()
+    };
 
-    v_flex()
-        .gap_2()
+    rect()
+        .width(Size::fill())
+        .spacing(8.)
+        .child("Primary")
+        .child(body)
+}
+
+fn reflections_section(model: State<Model>, peers: Vec<PairedPeer>) -> Rect {
+    rect()
+        .width(Size::fill())
+        .spacing(8.)
         .child("Reflections")
         .children(peers.into_iter().map(|peer| {
-            let on_remove = on_remove.clone();
             let id = peer.endpoint_id;
-            h_flex()
-                .justify_between()
-                .items_center()
-                .gap_3()
-                .child(
-                    v_flex()
-                        .gap_0p5()
-                        .child(div().child(peer.friendly_name.clone()))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(muted)
-                                .child(format!("{}", id.fmt_short())),
-                        ),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("remove-{}", id.fmt_short())))
-                        .outline()
-                        .label("Remove")
-                        .on_click(move |_, _, cx| {
-                            on_remove(id, cx);
-                        }),
-                )
+            peer_row(
+                peer.friendly_name,
+                id,
+                Button::new()
+                    .outline()
+                    .on_press(move |_| crate::remove_reflection(model, id))
+                    .child("Remove"),
+            )
+            .into()
         }))
+}
+
+fn peer_row(name: String, id: EndpointId, action: Button) -> Rect {
+    rect()
+        .horizontal()
+        .width(Size::fill())
+        .main_align(Alignment::SpaceBetween)
+        .cross_align(Alignment::Center)
+        .child(
+            rect()
+                .spacing(2.)
+                .child(name)
+                .child(
+                    label()
+                        .font_size(13.)
+                        .color(MUTED)
+                        .text(id.fmt_short().to_string()),
+                ),
+        )
+        .child(action)
 }

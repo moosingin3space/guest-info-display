@@ -14,49 +14,69 @@ cargo test           # run tests
 
 The Flatpak manifest is `xyz.mooshq.GuestInfoDisplay.json` targeting `org.freedesktop.Platform 25.08`.
 
+Skia comes from a prebuilt archive, never a source build: `freya-skia-bindings` is
+pinned with `no-compile`, so a missing or mismatched prebuilt fails the build in
+seconds. Online builds download it from `marc2332/rust-skia` releases; the Flatpak
+build fetches it as a manifest source and points `SKIA_BINARIES_URL` at it. Bumping
+Freya means bumping `freya-skia-bindings` and the manifest's URLs and checksums
+together — see `plans/freya-skia-port.md`.
+
+On hosts whose linker can't find `libstdc++`/EGL dev libraries, build inside the SDK:
+
+```bash
+flatpak run --user --devel --filesystem=$PWD --share=network \
+  --env=CARGO_TARGET_DIR=$PWD/target/sdk --command=bash org.freedesktop.Sdk//25.08 \
+  -c 'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH; cargo build'
+```
+
 ## Architecture
 
-A modular Rust desktop application using [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) (v0.2.2) for rendering.
+A modular Rust desktop application using [Freya](https://freyaui.dev/) (0.4.3, Skia + winit) for rendering.
 
 ### Module Structure
 
-- `src/main.rs`: Entry point and UI orchestration. Manages the main event loop, GPUI tasks for clock/Spotify, and renders the top-level view.
+- `src/main.rs`: Entry point and UI orchestration. Owns the `Model`, starts the Freya tasks for clock/Spotify/pairing, and renders the top-level view.
 - `src/spotify.rs`: Integration with Spotify Connect via `librespot`. Runs a background Tokio runtime for discovery and playback events, exposing a `SharedSpotifyState` (Mutex-protected) and an event channel to the UI.
-- `src/persistence.rs`: SQLite-backed settings storage using `rusqlite` (bundled). Stores Wi-Fi credentials and the Spotify device ID.
-- `src/qr_code.rs`: Wi-Fi QR code generation using `qrcodegen`. Renders QR codes directly to a GPUI `canvas`.
-- `src/settings_dialog.rs`: A declarative GPUI dialog for configuring Wi-Fi credentials.
-
-`build.rs` links against X11 system libraries (`xcb`, `xkbcommon`, `xkbcommon-x11`) via pkg-config to work around library paths issues on some Linux distributions.
+- `src/multi_screen.rs`: iroh-based pairing and state mirroring between a primary and its reflections.
+- `src/persistence.rs`: SQLite-backed settings storage using `rusqlite` (bundled). Stores Wi-Fi credentials, role, audio device, paired peers and the iroh identity.
+- `src/qr_code.rs`: Wi-Fi QR code generation using `qrcodegen`, drawn with Skia calls in a Freya `canvas`.
+- `src/settings_dialog.rs`: The settings form, rendered inside a Freya `Popup`.
+- `src/inhibitor.rs`: XDG idle-inhibit portal while playback is active.
 
 ### UI Structure
 
 ```
-TitleBar
-Header (h_flex, justify_between)
+Window (native decorations, toggled by the "Hide titlebar" setting)
+Header (horizontal, space-between)
   ├── Date label (left)
   └── 24-hour clock (right, Adwaita Mono font)
-Body (h_flex, flex_1)
-  ├── Spotify card (h_flex, flex_1)
-  │   ├── Left column (v_flex, flex_1)
+Body (horizontal, flex 1)
+  ├── Spotify card (horizontal, flex 1)
+  │   ├── Left column (flex 1)
   │   │   ├── "Now Playing" section header
-  │   │   └── h_flex: 220px Cover Art (fetched asynchronously) + Song/Artist stack
-  │   └── Right column (v_flex, 280px)
+  │   │   └── 220px Cover Art (ImageViewer over encoded bytes) + Song/Artist stack
+  │   └── Right column (280px)
   │       ├── "Up Next" section header
-  │       └── Queue item list (top 5 tracks, hydrated asynchronously)
-  └── WiFi sidebar (v_flex, 320px, justify_between)
+  │       └── Queue item list (top 5 tracks)
+  └── WiFi sidebar (320px, space-between)
       ├── WiFi label + 220px QR code (generated from persistence)
       └── Settings gear button (bottom)
+Footer: role · short endpoint id
+Popups: pairing approval, settings
 ```
 
 ### State and Live Updates
 
-- **Clock**: `GuestInfoDisplay` holds a `chrono::DateTime<Local>` updated every second via a `gpui::Timer` task.
-- **Spotify**: Managed via `_spotify_task` in `main.rs`, which listens for events (StateChanged, CoverLoaded) from the Spotify thread. It updates the local `current_track`, `queue`, and `covers` (HashMap of `RenderImage`) and calls `cx.notify()`.
-- **Persistence**: Wi-Fi credentials are re-read from the database when updated via the settings dialog.
+- **Model**: the root component holds a single `State<Model>`. Event handlers and tasks mutate it with `model.write()`, which re-renders readers. Tasks that must outlive the component that started them (backend listener, pairing) use `spawn_forever`.
+- **Clock**: a separate `State<DateTime<Local>>` updated every second by a Freya task sleeping on `tokio::time` (`main` enters a small Tokio runtime for this).
+- **Spotify**: `rebuild_backend` starts the primary (librespot) or reflection backend and a listener task forwarding its events (StateChanged, CoverLoaded, …) into the model. Covers are kept as encoded bytes keyed by URL.
+- **UI scale**: `use_ui_zoom` sets Freya's per-window zoom from the physical window width (`DESIGN_WIDTH` 1280, capped at 1.75), so layout code uses plain design sizes.
+- **zbus**: `ashpd` must stay on its `async-io` feature. Its default `tokio` feature switches zbus to Tokio process-wide and Freya's own zbus threads panic.
 
 ### Visual Design
 
-- Background: `linear_gradient(180°, #0a1033 → #3b1d6e)` (dark navy to deep purple).
-- Cards/panels: `hsla(0,0,1,0.06)` fill with `hsla(0,0,1,0.12)` borders (translucent white).
-- Muted text: `hsla(0,0,1,0.55)`.
+- Background: linear gradient `#0a1033 → #3b1d6e` top to bottom (Freya angle `0°`; its angles run opposite to CSS).
+- Cards/panels: white at alpha 15 fill with alpha 31 borders (translucent white).
+- Muted text: white at alpha 140.
 - Typography: Uses `Adwaita Mono` for the clock if available.
+- Components use Freya's `dark_theme()`.

@@ -46,19 +46,16 @@ pub struct SpotifyState {
 
 pub type SharedSpotifyState = Arc<Mutex<SpotifyState>>;
 
-/// A fetched and decoded piece of cover art, in BGRA8 pixel format (GPUI's internal layout).
+/// A fetched piece of cover art. The UI decodes it off the render thread;
+/// primaries also forward the bytes to subscribers over the wire.
 pub struct CoverImage {
     pub url: String,
-    pub width: u32,
-    pub height: u32,
-    pub bgra: Vec<u8>,
-    /// Original encoded JPEG/PNG bytes from Spotify's CDN, retained so primaries
-    /// can forward to subscribers over the wire without re-fetching.
+    /// Encoded JPEG/PNG bytes as served by Spotify's CDN.
     pub encoded: Vec<u8>,
 }
 
 /// Single channel of Spotify updates to the UI. Executor-agnostic — safe to `recv()`
-/// from a GPUI task.
+/// from a Freya task.
 pub enum Event {
     /// `SpotifyState` has been mutated; re-read `SharedSpotifyState`.
     StateChanged,
@@ -716,15 +713,9 @@ async fn kick_off_cover_fetch(
         let mut delay = std::time::Duration::from_millis(500);
         for attempt in 0..4 {
             match fetch_cover(&session, &url).await {
-                Ok((width, height, bgra, encoded)) => {
+                Ok(encoded) => {
                     let _ = tx
-                        .send(Event::CoverLoaded(CoverImage {
-                            url,
-                            width,
-                            height,
-                            bgra,
-                            encoded,
-                        }))
+                        .send(Event::CoverLoaded(CoverImage { url, encoded }))
                         .await;
                     return;
                 }
@@ -747,31 +738,13 @@ async fn kick_off_cover_fetch(
 async fn fetch_cover(
     session: &Session,
     url: &str,
-) -> Result<(u32, u32, Vec<u8>, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let req = http::Request::builder()
         .method("GET")
         .uri(url)
         .body(bytes::Bytes::new())?;
     let bytes = session.http_client().request_body(req).await?;
-    let encoded = bytes.to_vec();
-    let (w, h, bgra) = decode_cover_bytes(&bytes)?;
-    Ok((w, h, bgra, encoded))
-}
-
-/// Decodes encoded JPEG/PNG bytes into BGRA pixels suitable for [`CoverImage`].
-/// Used both by the local cover-fetch path and by reflections receiving
-/// cover-art payloads over the wire.
-pub fn decode_cover_bytes(
-    encoded: &[u8],
-) -> Result<(u32, u32, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
-    let img = image::load_from_memory(encoded)?.into_rgba8();
-    let (w, h) = img.dimensions();
-    let mut buf = img.into_raw();
-    // GPUI's renderer expects BGRA; the `image` crate decodes to RGBA.
-    for px in buf.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-    Ok((w, h, buf))
+    Ok(bytes.to_vec())
 }
 
 fn track_info(item: &AudioItem) -> SpotifyTrackInfo {

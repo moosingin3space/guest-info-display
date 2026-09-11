@@ -37,7 +37,7 @@ jobs:
       - name: Build and test
         uses: wolfi-dev/wolfi-act@7f6915e256697663d18940570e932e990e6adb93 # main
         with:
-          packages: rust,libxcb-dev,libxkbcommon-dev,pkgconf,clang-22,openssl-dev,alsa-lib-dev,fontconfig-dev,freetype-dev
+          packages: rust,pkgconf,clang-22,openssl-dev,alsa-lib-dev,fontconfig-dev,freetype-dev,mesa-dev,wayland-dev,libstdc++-dev
           command: |
             export CARGO_HOME=/work/.cargo-home
             cargo build --release

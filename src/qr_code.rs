@@ -1,4 +1,5 @@
-use gpui::{AnyElement, Bounds, IntoElement, Point, Size, Window, black, canvas, div, fill, prelude::*, px, white};
+use freya::engine::prelude::{Paint, SkRect};
+use freya::prelude::*;
 use qrcodegen::{QrCode, QrCodeEcc};
 
 use crate::persistence::{WifiCredentials, WifiSecurity};
@@ -31,52 +32,43 @@ fn escape_field(s: &str) -> String {
 }
 
 /// Renders a Wi-Fi QR code that fills its parent element.
-/// The returned element should be placed inside a fixed-size div.
+/// The returned element should be placed inside a fixed-size container.
 /// Falls back to a text placeholder if QR generation fails.
-pub fn wifi_qr_element(creds: &WifiCredentials) -> AnyElement {
+pub fn wifi_qr_element(creds: &WifiCredentials) -> Element {
     let Ok(qr) = QrCode::encode_text(&wifi_string(creds), QrCodeEcc::Medium) else {
-        return div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child("QR unavailable")
-            .into_any_element();
+        return rect().expanded().center().child("QR unavailable").into();
     };
 
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window: &mut Window, _| {
-            let n = qr.size() as f32;
-            let w = f32::from(bounds.size.width);
-            let h = f32::from(bounds.size.height);
-            let module_px = w.min(h) / n;
-            let ox = f32::from(bounds.origin.x);
-            let oy = f32::from(bounds.origin.y);
+    canvas(RenderCallback::new(move |ctx: &mut CanvasContext| {
+        let n = qr.size() as f32;
+        let w = ctx.size.width;
+        let h = ctx.size.height;
+        let module_px = w.min(h) / n;
 
-            window.paint_quad(fill(bounds, white()));
+        // Anti-aliasing would leave hairline seams between adjacent modules.
+        let mut paint = Paint::default();
+        paint.set_anti_alias(false);
 
-            for row in 0..qr.size() {
-                for col in 0..qr.size() {
-                    if qr.get_module(col, row) {
-                        window.paint_quad(fill(
-                            Bounds {
-                                origin: Point {
-                                    x: px(ox + col as f32 * module_px),
-                                    y: px(oy + row as f32 * module_px),
-                                },
-                                size: Size {
-                                    width: px(module_px),
-                                    height: px(module_px),
-                                },
-                            },
-                            black(),
-                        ));
-                    }
+        paint.set_color(Color::WHITE);
+        ctx.canvas.draw_rect(SkRect::from_xywh(0., 0., w, h), &paint);
+
+        paint.set_color(Color::BLACK);
+        for row in 0..qr.size() {
+            for col in 0..qr.size() {
+                if qr.get_module(col, row) {
+                    ctx.canvas.draw_rect(
+                        SkRect::from_xywh(
+                            col as f32 * module_px,
+                            row as f32 * module_px,
+                            module_px,
+                            module_px,
+                        ),
+                        &paint,
+                    );
                 }
             }
-        },
-    )
-    .size_full()
-    .into_any_element()
+        }
+    }))
+    .expanded()
+    .into()
 }
