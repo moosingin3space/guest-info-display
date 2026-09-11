@@ -15,7 +15,7 @@ use super::{
     ALPN,
     proto::{DisplayProtocol, PairingRequest, PairingResponse, SubscribeRequest, WireMessage},
 };
-use crate::spotify::{self, CoverImage, Event, SharedSpotifyState, SpotifyState};
+use crate::spotify::{CoverImage, Event, SharedSpotifyState, SpotifyState};
 
 /// Drive a reflection client until shutdown. Reconnects on session end with an
 /// exponential backoff (capped at 30s, reset on each successful snapshot) per
@@ -134,19 +134,7 @@ async fn run_session(
                 }
             }
             WireMessage::CoverArt { url, encoded } => {
-                let cover = match spotify::decode_cover_bytes(&encoded) {
-                    Ok((w, h, bgra)) => CoverImage {
-                        url,
-                        width: w,
-                        height: h,
-                        bgra,
-                        encoded,
-                    },
-                    Err(e) => {
-                        log::debug!("reflection: cover decode failed: {e}");
-                        continue;
-                    }
-                };
+                let cover = CoverImage { url, encoded };
                 if events_tx.send(Event::CoverLoaded(cover)).await.is_err() {
                     return Ok(SessionEnd::ConsumerGone);
                 }

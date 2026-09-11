@@ -4,17 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ashpd = { version = "0.13", features = ["inhibit"] }
+# Not ashpd's default `tokio` feature: that switches zbus to its Tokio executor
+# process-wide, and Freya's own zbus users (theme/accent watcher, AT-SPI)
+# run on threads with no Tokio runtime and panic.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "inhibit"] }
 async-channel = "2"
 bytes = "1"
 chrono = "0.4"
 cpal = "0.16"
+# Pinned exactly: the Skia prebuilt in the Flatpak manifest is keyed to the
+# freya-skia-bindings version this resolves to. Bump both together, along
+# with the manifest's URLs and checksums.
+# `engine` only re-exports Skia types (for the QR canvas); it adds no Skia features.
+freya = { version = "=0.4.3", features = ["engine"] }
+# Not used directly. Present only to turn on `no-compile`, so a prebuilt key
+# mismatch panics instead of silently building Skia from source.
+# default-features = false so this entry adds no features to the key.
+freya-skia-bindings = { version = "=0.98.1", default-features = false, features = ["no-compile"] }
 futures-util = "0.3"
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
 http = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 iroh = { version = "0.98", features = ["address-lookup-mdns"] }
 irpc = { version = "0.14", features = ["derive", "rpc"] }
 irpc-iroh = "0.14"
@@ -24,13 +32,9 @@ pretty_env_logger = "0.5.0"
 qrcodegen = "1.8.0"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-smallvec = "1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 vergen = "=9.0"
-
-[build-dependencies]
-pkg-config = "0.3.33"
 
 [dev-dependencies]
 postcard = { version = "1", features = ["alloc"] }

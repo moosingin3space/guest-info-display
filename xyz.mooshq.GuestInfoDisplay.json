@@ -22,7 +22,8 @@
         "append-path": "/usr/lib/sdk/rust-stable/bin",
         "env": {
           "CARGO_HOME": "/run/build/app/cargo",
-          "CARGO_NET_OFFLINE": "true"
+          "CARGO_NET_OFFLINE": "true",
+          "SKIA_BINARIES_URL": "file:///run/build/app/skia-binaries.tar.gz"
         }
       },
       "build-commands": [
@@ -36,9 +37,24 @@
       "sources": [
         {
           "type": "dir",
-          "path": "./"
+          "path": "./",
+          "skip": ["target", ".flatpak-builder", "builddir", "repo", "spike"]
         },
-        "generated-sources.json"
+        "generated-sources.json",
+        {
+          "type": "file",
+          "only-arches": ["x86_64"],
+          "url": "https://github.com/marc2332/rust-skia/releases/download/0.98.1/skia-binaries-b5756d8613bf27909a64-x86_64-unknown-linux-gnu-egl-gl-jpegd-jpege-svg-textlayout-vulkan-wayland-webpd-webpe-x11.tar.gz",
+          "sha256": "6a70402b54dac8647a0b4f914ff437298a55eb8de0d6c6357521296817e44dc6",
+          "dest-filename": "skia-binaries.tar.gz"
+        },
+        {
+          "type": "file",
+          "only-arches": ["aarch64"],
+          "url": "https://github.com/marc2332/rust-skia/releases/download/0.98.1/skia-binaries-b5756d8613bf27909a64-aarch64-unknown-linux-gnu-egl-gl-jpegd-jpege-svg-textlayout-vulkan-wayland-webpd-webpe-x11.tar.gz",
+          "sha256": "103e1d19d7de6f58736f7e2aea091efb6264f26e1ed38205746724ab9002a84e",
+          "dest-filename": "skia-binaries.tar.gz"
+        }
       ]
     }
   ]
