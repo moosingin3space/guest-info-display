@@ -286,19 +286,3 @@ pub struct LayoutDoc {
     pub theme: Theme,
     pub root: Node,
 }
-
-/// The implicit shape of `root`: a full-bleed column.
-pub fn root_node(children: Vec<Node>) -> Node {
-    Node {
-        style: Style {
-            width: Some(Sizing::Fill),
-            height: Some(Sizing::Fill),
-            ..Style::default()
-        },
-        widget: Widget::Container(Container {
-            direction: Direction::Column,
-            surface: false,
-            children,
-        }),
-    }
-}

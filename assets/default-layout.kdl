@@ -1,0 +1,49 @@
+// The built-in layout. Embedded with include_str! and parsed through exactly
+// the same path as a user's file, so there is only ever one renderer and this
+// doubles as a worked example — "Copy default to config" in settings writes
+// this file verbatim.
+//
+// Every number is a design pixel at 1280 wide; the UI scales itself up on
+// larger panels, so a file written for a 1080p TV also works on a 4K one.
+
+theme {
+    background {
+        // `to` is a CSS-style direction. Freya's angles run the other way
+        // round; the renderer converts.
+        gradient to="bottom" {
+            stop "#0a1033" 0
+            stop "#3b1d6e" 100
+        }
+    }
+
+    surface        "#ffffff0f"
+    surface-border "#ffffff1f"
+    placeholder    "#ffffff14"
+    text           "#ffffff"
+    muted-text     "#ffffff8c"
+
+    mono-font-family "Adwaita Mono"
+}
+
+root {
+    // Header: date on the left, clock on the right.
+    row width="fill" padding="20 32" main-align="space-between" cross-align="center" {
+        date font-size=24 weight="semibold"
+        clock font-size=30 weight="bold" mono=#true
+    }
+
+    // Body: the player takes what's left, the Wi-Fi sidebar is fixed width.
+    row width="fill" flex=1 spacing=24 padding="0 32 8 32" {
+        card flex=1 height="fill" direction="row" spacing=32 padding=24 {
+            now-playing flex=1 height="fill" cover-size=220
+            up-next width=280 height="fill" count=5
+        }
+
+        card width=320 height="fill" padding=24 main-align="space-between" cross-align="center" {
+            wifi-qr width="fill" heading="Scan to connect to Wi-Fi" size=220
+            settings-button
+        }
+    }
+
+    role-label
+}
