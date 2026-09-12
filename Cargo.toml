@@ -24,8 +24,11 @@ iroh = "1"
 iroh-mdns-address-lookup = "0.6"
 irpc = { version = "0.17", features = ["derive", "rpc"] }
 irpc-iroh = "0.17"
+kdl = "6"
 librespot = { git = "https://github.com/librespot-org/librespot", features = ["rodio-backend"] }
 log = "0.4.29"
+# kdl hands out miette::SourceSpan but doesn't re-export the crate.
+miette = { version = "7.6", default-features = false }
 pretty_env_logger = "0.5.0"
 qrcodegen = "1.8.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }

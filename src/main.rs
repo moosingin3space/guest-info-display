@@ -8,6 +8,7 @@ use iroh::EndpointId;
 
 mod audio_devices;
 mod inhibitor;
+mod layout;
 mod multi_screen;
 mod persistence;
 mod qr_code;
