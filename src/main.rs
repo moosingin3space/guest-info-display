@@ -133,10 +133,9 @@ fn rebuild_backend(mut model: State<Model>) {
     let new_backend = match m.role {
         persistence::Role::Primary => {
             let device_id = m.endpoint_id.fmt_short().to_string();
-            let audio_device = m
-                .db
-                .audio_device_name()
-                .expect("failed to load audio device name");
+            let audio_device =
+                m.db.audio_device_name()
+                    .expect("failed to load audio device name");
             Some(BackendHandle::Primary(spotify::start(
                 device_id,
                 audio_device,
@@ -380,19 +379,8 @@ fn use_ui_zoom() {
     });
 }
 
-const SURFACE: (u8, u8, u8, u8) = (255, 255, 255, 15);
-const SURFACE_BORDER: (u8, u8, u8, u8) = (255, 255, 255, 31);
-const PLACEHOLDER: (u8, u8, u8, u8) = (255, 255, 255, 20);
+/// Popup chrome only — the layout document owns every other color.
 const MUTED_TEXT: (u8, u8, u8, u8) = (255, 255, 255, 140);
-
-static SETTINGS_ICON: &[u8] = include_bytes!("../assets/settings.svg");
-
-fn card() -> Rect {
-    rect()
-        .corner_radius(16.)
-        .background(SURFACE)
-        .border(Border::new().fill(SURFACE_BORDER).width(1.))
-}
 
 fn app() -> impl IntoElement {
     use_init_theme(dark_theme);
@@ -445,81 +433,12 @@ fn app() -> impl IntoElement {
     });
 
     let m = model.read();
-    let (date_str, time_str) = {
-        let now = now.read();
-        (
-            now.format("%A, %B %-d").to_string(),
-            now.format("%H:%M:%S").to_string(),
-        )
-    };
-
-    let show_disconnected = matches!(m.role, persistence::Role::Reflection) && !m.connected;
-
-    let header = rect()
-        .horizontal()
-        .width(Size::fill())
-        .padding((20., 32.))
-        .main_align(Alignment::SpaceBetween)
-        .cross_align(Alignment::Center)
-        .child(
-            label()
-                .font_size(24.)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .text(date_str),
-        )
-        .child(
-            label()
-                .font_size(30.)
-                .font_family("Adwaita Mono")
-                .font_weight(FontWeight::BOLD)
-                .text(time_str),
-        );
-
-    let body = rect()
-        .horizontal()
-        .width(Size::fill())
-        .height(Size::flex(1.))
-        .content(Content::flex())
-        .spacing(24.)
-        .padding((0., 32., 8., 32.))
-        .child(if show_disconnected {
-            disconnected_card()
-        } else {
-            now_playing_card(&m)
-        })
-        .child(wifi_sidebar(&m, settings_open));
-
-    let footer = label()
-        .width(Size::fill())
-        .margin((0., 0., 16., 0.))
-        .font_size(14.)
-        .color(MUTED_TEXT)
-        .text_align(TextAlign::Center)
-        .text(format!(
-            "{} · {}",
-            match m.role {
-                persistence::Role::Primary => "Primary",
-                persistence::Role::Reflection => "Reflection",
-            },
-            m.endpoint_id.fmt_short(),
-        ));
-
     let approval = approval_popup(model, &m);
 
-    rect()
-        .expanded()
-        .content(Content::flex())
-        .color(Color::WHITE)
-        .background(
-            // Freya measures the angle opposite to CSS: 0° runs top to bottom.
-            LinearGradient::new()
-                .angle(0.)
-                .stop(((10, 16, 51), 0.))
-                .stop(((59, 29, 110), 100.)),
-        )
-        .child(header)
-        .child(body)
-        .child(footer)
+    // Everything a guest sees comes from the layout document. The popups below
+    // are chrome: always present, never configurable, so a layout can't lay
+    // the settings dialog out of existence.
+    layout::render::render(layout::default_doc(), &m, *now.read(), settings_open)
         .child(approval)
         .child(
             Popup::new()
@@ -527,201 +446,15 @@ fn app() -> impl IntoElement {
                     let mut settings_open = settings_open;
                     settings_open.set(false);
                 })
-                .maybe_child(settings_open.read().then(|| settings_dialog::SettingsDialog {
-                    model,
-                    open: settings_open,
-                })),
-        )
-}
-
-fn now_playing_card(m: &Model) -> Rect {
-    let (track_name, track_artist) = match &m.current_track {
-        Some(t) => (t.name.clone(), t.artists.clone()),
-        None => ("Nothing playing".to_string(), String::new()),
-    };
-    let cover = m
-        .current_track
-        .as_ref()
-        .and_then(|t| t.cover_url.as_ref())
-        .and_then(|url| m.covers.get(url).map(|bytes| (url.clone(), bytes.clone())));
-
-    let cover_box = rect()
-        .width(Size::px(220.))
-        .height(Size::px(220.))
-        .corner_radius(12.)
-        .overflow(Overflow::Clip);
-    let cover_box = if let Some(source) = cover {
-        cover_box.child(
-            ImageViewer::new(source)
-                .expanded()
-                .aspect_ratio(AspectRatio::Max)
-                .image_cover(ImageCover::Center),
-        )
-    } else {
-        cover_box
-            .center()
-            .background(PLACEHOLDER)
-            .child(label().color(MUTED_TEXT).text("Cover Art"))
-    };
-
-    let now_playing = rect()
-        .width(Size::flex(1.))
-        .height(Size::fill())
-        .overflow(Overflow::Clip)
-        .spacing(16.)
-        .child(
-            label()
-                .color(MUTED_TEXT)
-                .font_size(30.)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .text("Now Playing"),
-        )
-        .child(
-            rect()
-                .horizontal()
-                .width(Size::fill())
-                .content(Content::flex())
-                .overflow(Overflow::Clip)
-                .spacing(20.)
-                .cross_align(Alignment::Center)
-                .child(cover_box)
-                .child(
-                    rect()
-                        .width(Size::flex(1.))
-                        .spacing(8.)
-                        .child(
-                            label()
-                                .width(Size::fill())
-                                .max_lines(1)
-                                .text_overflow(TextOverflow::Ellipsis)
-                                .font_size(24.)
-                                .font_weight(FontWeight::BOLD)
-                                .text(track_name),
-                        )
-                        .child(
-                            label()
-                                .width(Size::fill())
-                                .max_lines(1)
-                                .text_overflow(TextOverflow::Ellipsis)
-                                .font_size(20.)
-                                .color(MUTED_TEXT)
-                                .text(track_artist),
-                        ),
+                .maybe_child(
+                    settings_open
+                        .read()
+                        .then(|| settings_dialog::SettingsDialog {
+                            model,
+                            open: settings_open,
+                        }),
                 ),
-        );
-
-    let up_next_items: Element = if m.queue.is_empty() {
-        label()
-            .font_size(14.)
-            .color(MUTED_TEXT)
-            .text("—")
-            .into()
-    } else {
-        rect()
-            .width(Size::fill())
-            .spacing(12.)
-            .children(m.queue.iter().take(5).map(|t| {
-                if t.is_resolved() {
-                    queue_item(t.name.clone(), t.artists.clone())
-                } else {
-                    queue_item("--".to_string(), String::new())
-                }
-                .into()
-            }))
-            .into()
-    };
-
-    let up_next = rect()
-        .width(Size::px(280.))
-        .height(Size::fill())
-        .spacing(16.)
-        .child(
-            label()
-                .color(MUTED_TEXT)
-                .font_size(14.)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .text("Up Next"),
         )
-        .child(up_next_items);
-
-    card()
-        .horizontal()
-        .width(Size::flex(1.))
-        .height(Size::fill())
-        .content(Content::flex())
-        .overflow(Overflow::Clip)
-        .spacing(32.)
-        .padding(24.)
-        .child(now_playing)
-        .child(up_next)
-}
-
-fn disconnected_card() -> Rect {
-    card()
-        .width(Size::flex(1.))
-        .height(Size::fill())
-        .center()
-        .child(
-            label()
-                .color(MUTED_TEXT)
-                .font_size(24.)
-                .font_weight(FontWeight::SEMI_BOLD)
-                .text("Primary unavailable"),
-        )
-}
-
-fn wifi_sidebar(m: &Model, settings_open: State<bool>) -> Rect {
-    let qr_box = rect()
-        .width(Size::px(220.))
-        .height(Size::px(220.))
-        .corner_radius(12.)
-        .overflow(Overflow::Clip);
-    let qr_box = if let Some(creds) = &m.wifi_creds {
-        qr_box.child(qr_code::wifi_qr_element(creds))
-    } else {
-        qr_box
-            .center()
-            .background(PLACEHOLDER)
-            .child(label().color(MUTED_TEXT).text("Not configured"))
-    };
-
-    let settings_button = TooltipContainer::new(Tooltip::new("Settings")).child(
-        Button::new()
-            .flat()
-            .on_press(move |_| {
-                let mut settings_open = settings_open;
-                settings_open.set(true);
-            })
-            .child(
-                // Without an explicit color the viewer waits to inherit one
-                // before rasterizing, and the flat button draws nothing.
-                SvgViewer::new(("settings-icon", SETTINGS_ICON))
-                    .color(Color::WHITE)
-                    .width(Size::px(24.))
-                    .height(Size::px(24.)),
-            ),
-    );
-
-    card()
-        .width(Size::px(320.))
-        .height(Size::fill())
-        .padding(24.)
-        .main_align(Alignment::SpaceBetween)
-        .cross_align(Alignment::Center)
-        .child(
-            rect()
-                .width(Size::fill())
-                .spacing(16.)
-                .cross_align(Alignment::Center)
-                .child(
-                    label()
-                        .font_size(20.)
-                        .font_weight(FontWeight::SEMI_BOLD)
-                        .text("Scan to connect to Wi-Fi"),
-                )
-                .child(qr_box),
-        )
-        .child(settings_button)
 }
 
 fn approval_popup(model: State<Model>, m: &Model) -> Popup {
@@ -760,28 +493,6 @@ fn approval_popup(model: State<Model>, m: &Model) -> Popup {
         ],
     };
     Popup::new().children(children)
-}
-
-fn queue_item(title: String, artist: String) -> Rect {
-    rect()
-        .width(Size::fill())
-        .spacing(2.)
-        .child(
-            label()
-                .width(Size::fill())
-                .max_lines(1)
-                .text_overflow(TextOverflow::Ellipsis)
-                .text(title),
-        )
-        .child(
-            label()
-                .width(Size::fill())
-                .max_lines(1)
-                .text_overflow(TextOverflow::Ellipsis)
-                .font_size(14.)
-                .color(MUTED_TEXT)
-                .text(artist),
-        )
 }
 
 fn main() {
