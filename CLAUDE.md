@@ -4,12 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+A `Justfile` wraps the common tasks (`just` lists them):
+
 ```bash
-cargo build          # debug build
-cargo build --release  # release build
-cargo run            # run the application
-cargo test           # run tests
-./scripts/make-flatpak.sh  # build Flatpak package
+just build / test / run   # dev loop, run inside the 25.08 Flatpak SDK
+just cargo <args>         # any cargo command inside the SDK
+just sources              # regenerate generated-sources.json after Cargo.lock changes
+just ci                   # every CI job locally: check-sources, ci-build, flatpak-bundle
+just ci-build             # CI's Wolfi build+test, reading packages/command from ci.yml, in podman
+just flatpak-test         # build the bundle, install it for your user, and launch it
+just flatpak-run          # launch the installed Flatpak
 ```
 
 The Flatpak manifest is `xyz.mooshq.GuestInfoDisplay.json` targeting `org.freedesktop.Platform 25.08`.
@@ -21,13 +25,8 @@ build fetches it as a manifest source and points `SKIA_BINARIES_URL` at it. Bump
 Freya means bumping `freya-skia-bindings` and the manifest's URLs and checksums
 together — see `plans/freya-skia-port.md`.
 
-On hosts whose linker can't find `libstdc++`/EGL dev libraries, build inside the SDK:
-
-```bash
-flatpak run --user --devel --filesystem=$PWD --share=network \
-  --env=CARGO_TARGET_DIR=$PWD/target/sdk --command=bash org.freedesktop.Sdk//25.08 \
-  -c 'export PATH=/usr/lib/sdk/rust-stable/bin:$PATH; cargo build'
-```
+Plain host `cargo build` works only where the linker finds `libstdc++`, EGL/GL,
+Wayland and fontconfig dev libraries; otherwise use the SDK recipes above.
 
 ## Architecture
 
