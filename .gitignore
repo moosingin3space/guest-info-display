@@ -3,6 +3,9 @@ tools/
 builddir/
 .flatpak-builder/
 repo/
+/guest-info-display.flatpak
+# Created by the CI build command (`just ci-build` runs it verbatim).
+/.cargo-home
 specs
 # CocoIndex Code (ccc)
 /.cocoindex_code/
