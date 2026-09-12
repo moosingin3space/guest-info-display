@@ -1,0 +1,45 @@
+// Artwork-forward: a large cover with the track beside it, and the queue down
+// one side. For a screen people are looking at *because* of the music.
+//
+// Also a worked example of the reflection story. Pair a second display to this
+// one and it shows the same tree in the same colours — but its clock is its
+// own, and its Wi-Fi code is its own network's, not the primary's. The layout
+// mirrors; local data does not.
+
+theme {
+    background {
+        gradient to="bottom-right" {
+            stop "#0b0b0f" 0
+            stop "#241a33" 60
+            stop "#3d1f3d" 100
+        }
+    }
+
+    surface        "#ffffff0f"
+    surface-border "#ffffff1f"
+    placeholder    "#ffffff14"
+    text           "#ffffff"
+    muted-text     "#ffffff8c"
+}
+
+root {
+    row width="fill" padding="16 28" main-align="space-between" cross-align="center" {
+        date font-size=18 color="#ffffff99"
+        clock font-size=24 mono=#true format="%H:%M"
+    }
+
+    row width="fill" flex=1 spacing=28 padding="0 28 12 28" {
+        card flex=1 height="fill" padding=32 main-align="center" {
+            now-playing width="fill" cover-size=360 heading="On the decks"
+        }
+
+        card width=300 height="fill" padding=24 {
+            up-next width="fill" height="fill" count=8
+        }
+    }
+
+    row width="fill" padding="0 28 12 28" main-align="space-between" cross-align="center" {
+        role-label
+        settings-button
+    }
+}

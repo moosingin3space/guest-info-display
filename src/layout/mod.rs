@@ -437,6 +437,43 @@ mod tests {
         assert!(state.load_error.is_empty());
     }
 
+    /// The examples are documentation, and documentation that does not parse
+    /// is worse than none. This is what stops a widget rename from silently
+    /// leaving three broken files in `assets/examples/`.
+    #[test]
+    fn shipped_examples_parse_without_a_single_diagnostic() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/examples");
+        let mut checked = 0;
+
+        for entry in std::fs::read_dir(&dir).expect("assets/examples must exist") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().is_none_or(|e| e != "kdl") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("readable example");
+            let name = path
+                .file_name()
+                .expect("named")
+                .to_string_lossy()
+                .to_string();
+
+            match load(&source) {
+                Ok(active) => assert!(
+                    active.diagnostics.is_empty(),
+                    "{name} parses but reports {:?}",
+                    active.diagnostics
+                ),
+                Err(diagnostics) => panic!("{name} does not parse: {diagnostics:?}"),
+            }
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 3,
+            "expected the shipped examples, found {checked}"
+        );
+    }
+
     #[test]
     fn theme_only_document_keeps_the_built_in_tree() {
         let active = load("theme { muted-text \"#ffffffa0\" }").expect("valid");

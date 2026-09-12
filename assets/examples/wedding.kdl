@@ -1,0 +1,50 @@
+// A photo that fills the screen while nobody is playing anything, and the
+// player card while they are. This is what `when` is for: one document, two
+// screens, no second file to keep in sync.
+//
+// Copy this to layout.kdl and put a `couple.jpg` next to it — or import both
+// together through Settings → Layout → Import layout…, which is the same thing
+// without having to find the config directory.
+
+theme {
+    background {
+        gradient to="bottom" {
+            stop "#2b1b2f" 0
+            stop "#7a4a52" 100
+        }
+    }
+
+    surface        "#ffffff14"
+    surface-border "#ffffff26"
+    placeholder    "#ffffff14"
+    text           "#fdf6ee"
+    muted-text     "#fdf6eeaa"
+}
+
+root {
+    row width="fill" padding="20 32" main-align="space-between" cross-align="center" {
+        date font-size=22 format="%A, %B %-d"
+        clock font-size=28 weight="bold" mono=#true format="%H:%M"
+    }
+
+    // Idle: the photo, and nothing competing with it.
+    image "couple.jpg" width="fill" flex=1 fit="cover" when="idle"
+
+    // Playing: the usual card, so guests can see what is on.
+    row width="fill" flex=1 spacing=24 padding="0 32" when="playing" {
+        card flex=1 height="fill" direction="row" spacing=32 padding=24 {
+            now-playing flex=1 height="fill" cover-size=240
+            up-next width=260 height="fill" count=4 heading="Coming up"
+        }
+    }
+
+    // The Wi-Fi strip stays put either way. It disappears entirely on a device
+    // with no credentials saved, rather than showing an empty box.
+    row width="fill" padding="16 32" spacing=24 cross-align="center" when="wifi-configured" {
+        wifi-qr width="fill" size=140 heading="Wi-Fi"
+        spacer flex=1
+        settings-button
+    }
+
+    role-label
+}
