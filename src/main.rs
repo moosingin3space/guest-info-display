@@ -309,6 +309,22 @@ fn forget_primary(mut model: State<Model>) {
     rebuild_backend(model);
 }
 
+/// Re-read `layout.kdl` now rather than waiting for the poll interval.
+fn reload_layout(mut model: State<Model>) {
+    model.write().layout.reload();
+}
+
+/// Write the built-in layout to the config path so a host has something that
+/// already works to edit. Refuses nothing here — the dialog asks for
+/// confirmation before calling this when a file is already there.
+fn copy_default_layout(mut model: State<Model>) {
+    if let Err(e) = layout::write_layout(layout::default_source()) {
+        log::warn!("layout: cannot write {}: {e}", layout::layout_path().display());
+        return;
+    }
+    model.write().layout.reload();
+}
+
 fn reject_pending_approval(mut model: State<Model>) {
     if let Some(approval) = model.write().pending_approvals.pop_front() {
         let _ = approval
@@ -450,6 +466,15 @@ fn app() -> impl IntoElement {
     // are chrome: always present, never configurable, so a layout can't lay
     // the settings dialog out of existence.
     layout::render::render(&m.layout.active.doc, &m, *now.read(), settings_open)
+        .on_global_key_down(move |e: Event<KeyboardEventData>| {
+            // The keyboard way into settings, independent of the layout.
+            if e.modifiers.contains(Modifiers::CONTROL)
+                && matches!(&e.key, Key::Character(c) if c == ",")
+            {
+                let mut settings_open = settings_open;
+                settings_open.set(true);
+            }
+        })
         .child(approval)
         .child(
             Popup::new()

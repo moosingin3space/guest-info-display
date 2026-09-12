@@ -3,9 +3,8 @@ use std::collections::HashSet;
 use freya::prelude::*;
 use iroh::EndpointId;
 
-use crate::Model;
-use crate::audio_devices;
 use crate::persistence::{PairedPeer, Role, WifiCredentials, WifiSecurity};
+use crate::{Model, audio_devices, layout};
 
 /// Live discovery + paired-peer state surfaced to the settings dialog. Part of
 /// the root [`Model`], so the dialog re-renders whenever pairing, approval,
@@ -129,7 +128,9 @@ impl Component for SettingsDialog {
             ))
             .child(field(
                 "Network name (SSID)",
-                Input::new(ssid).placeholder("MyNetwork").width(Size::fill()),
+                Input::new(ssid)
+                    .placeholder("MyNetwork")
+                    .width(Size::fill()),
             ))
             .child(field(
                 "Password",
@@ -166,9 +167,7 @@ impl Component for SettingsDialog {
                 Select::new()
                     .selected_item(audio_label)
                     .children(audio_options.into_iter().map(|option| {
-                        let text = option
-                            .clone()
-                            .unwrap_or_else(|| SYSTEM_DEFAULT.to_string());
+                        let text = option.clone().unwrap_or_else(|| SYSTEM_DEFAULT.to_string());
                         MenuItem::new()
                             .selected(option == current_audio)
                             .on_press(move |_| audio_device.set(option.clone()))
@@ -188,9 +187,11 @@ impl Component for SettingsDialog {
                     )
                     .child("Hide titlebar"),
             )
-            .maybe_child((current_role == Role::Reflection).then(|| {
-                pairing_section(model, discovered, paired_primary)
-            }))
+            .child(layout_section(model, current_role))
+            .maybe_child(
+                (current_role == Role::Reflection)
+                    .then(|| pairing_section(model, discovered, paired_primary)),
+            )
             .maybe_child(
                 (current_role == Role::Primary && !paired_reflections.is_empty())
                     .then(|| reflections_section(model, paired_reflections)),
@@ -246,6 +247,107 @@ fn field(title: &'static str, control: impl Into<Element>) -> Rect {
         .spacing(4.)
         .child(title)
         .child(control)
+}
+
+/// Layout status, and the actions that change which document is loaded.
+///
+/// A reflection gets the status line and nothing else: its layout comes from
+/// its primary, so an import or reload button here would imply otherwise.
+fn layout_section(model: State<Model>, role: Role) -> Rect {
+    let mut confirm_copy = use_state(|| false);
+
+    let (status, problems, has_file) = {
+        let m = model.read();
+        let state = &m.layout;
+        let status = if !state.load_error.is_empty() {
+            format!(
+                "{} — showing last good layout",
+                problem_count(state.load_error.len())
+            )
+        } else {
+            match state.active.source {
+                layout::Source::BuiltIn => "Using built-in default".to_string(),
+                layout::Source::File => "Loaded · layout.kdl".to_string(),
+            }
+        };
+        let problems: Vec<String> = state.problems().take(6).map(|d| d.to_string()).collect();
+        (
+            status,
+            problems,
+            state.active.source == layout::Source::File,
+        )
+    };
+
+    let mut section = rect()
+        .width(Size::fill())
+        .spacing(8.)
+        .child("Layout")
+        .child(label().font_size(13.).text(status))
+        .child(
+            label()
+                .font_size(12.)
+                .color(MUTED)
+                .text(layout::layout_path().display().to_string()),
+        );
+
+    if !problems.is_empty() {
+        section = section.child(rect().width(Size::fill()).spacing(2.).children(
+            problems.into_iter().map(|p| {
+                label()
+                    .width(Size::fill())
+                    .font_size(12.)
+                    .color(MUTED)
+                    .text(p)
+                    .into()
+            }),
+        ));
+    }
+
+    if role == Role::Reflection {
+        return section;
+    }
+
+    let copying = *confirm_copy.read();
+    section.child(
+        rect()
+            .horizontal()
+            .spacing(8.)
+            .child(
+                Button::new()
+                    .outline()
+                    .on_press(move |_| {
+                        confirm_copy.set(false);
+                        crate::reload_layout(model);
+                    })
+                    .child("Reload"),
+            )
+            .child(
+                Button::new()
+                    .outline()
+                    .on_press(move |_| {
+                        // Overwriting hand-edited work deserves a second press.
+                        if copying || !has_file {
+                            confirm_copy.set(false);
+                            crate::copy_default_layout(model);
+                        } else {
+                            confirm_copy.set(true);
+                        }
+                    })
+                    .child(if copying {
+                        "Overwrite layout.kdl?"
+                    } else {
+                        "Copy default to config"
+                    }),
+            ),
+    )
+}
+
+fn problem_count(n: usize) -> String {
+    if n == 1 {
+        "1 problem".to_string()
+    } else {
+        format!("{n} problems")
+    }
 }
 
 fn pairing_section(
@@ -324,15 +426,12 @@ fn peer_row(name: String, id: EndpointId, action: Button) -> Rect {
         .main_align(Alignment::SpaceBetween)
         .cross_align(Alignment::Center)
         .child(
-            rect()
-                .spacing(2.)
-                .child(name)
-                .child(
-                    label()
-                        .font_size(13.)
-                        .color(MUTED)
-                        .text(id.fmt_short().to_string()),
-                ),
+            rect().spacing(2.).child(name).child(
+                label()
+                    .font_size(13.)
+                    .color(MUTED)
+                    .text(id.fmt_short().to_string()),
+            ),
         )
         .child(action)
 }

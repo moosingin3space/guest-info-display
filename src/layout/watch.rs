@@ -68,10 +68,6 @@ impl Watcher {
 }
 
 /// Watch the layout file for the lifetime of the app, applying every change.
-///
-/// Reflections take their layout from the primary, so this only runs while the
-/// role is primary; the role check happens per tick rather than at startup so a
-/// live role switch is picked up without restarting the task.
 pub async fn run(mut model: State<Model>) {
     let mut watcher = Watcher::new(layout_path());
 

@@ -64,7 +64,39 @@ pub fn render(
     );
 
     let (direction, children) = unwrap_container(&doc.root);
-    container_children(root, direction, children, &ctx)
+    let root = container_children(root, direction, children, &ctx);
+
+    // A layout that omits `settings-button` would otherwise lock a host out of
+    // their own display — no way back to the Wi-Fi form, the role switch or
+    // pairing. `Ctrl+,` is the other way in, but many of these screens have no
+    // keyboard, so drop a faded gear in the corner. Globally positioned, so it
+    // sits over the layout rather than disturbing it.
+    if has_settings_button(&doc.root, &ctx) {
+        return root;
+    }
+    root.child(
+        rect()
+            .position(Position::new_global().bottom(16.).right(16.))
+            .opacity(0.5)
+            .child(settings_button(24., &ctx)),
+    )
+}
+
+/// Whether a settings button will actually be drawn — `when` conditions
+/// included, since a gear inside a branch that is currently hidden is no use
+/// to the person standing in front of the screen.
+fn has_settings_button(n: &Node, ctx: &Ctx<'_>) -> bool {
+    if !visible(n.style.when, ctx) {
+        return false;
+    }
+    match &n.widget {
+        Widget::SettingsButton { .. } => true,
+        Widget::Container(c) => c
+            .children
+            .iter()
+            .any(|child| has_settings_button(child, ctx)),
+        _ => false,
+    }
 }
 
 /// A container node's direction and children. Only containers are ever passed

@@ -44,6 +44,26 @@ pub fn layout_path() -> PathBuf {
     config_dir().join(LAYOUT_FILENAME)
 }
 
+/// The built-in layout's source, for "Copy default to config".
+pub fn default_source() -> &'static str {
+    DEFAULT_SOURCE
+}
+
+/// Write the layout file, creating the config directory if needed.
+///
+/// Temp file plus `rename(2)`, never a truncate-and-write: the mtime poller
+/// runs every 2s and must never observe a half-written document. The temp file
+/// is a sibling so the rename stays within one filesystem.
+pub fn write_layout(source: &str) -> std::io::Result<()> {
+    let path = layout_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("kdl.tmp");
+    std::fs::write(&tmp, source)?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// The built-in layout, embedded rather than written in Rust so there is only
 /// one renderer and the default doubles as a worked example.
 const DEFAULT_SOURCE: &str = include_str!("../../assets/default-layout.kdl");
@@ -129,6 +149,26 @@ impl LayoutState {
     pub fn use_built_in(&mut self) {
         self.active = built_in();
         self.load_error.clear();
+    }
+
+    /// Re-read the layout file now, for hosts who would rather not wait out
+    /// the poll interval. A file that has gone away falls back to the built-in
+    /// layout, same as the watcher would do.
+    pub fn reload(&mut self) {
+        let path = layout_path();
+        match std::fs::read_to_string(&path) {
+            Ok(source) => self.apply(&source, Source::File),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.use_built_in(),
+            Err(e) => {
+                log::warn!("layout: cannot read {}: {e}", path.display());
+                self.load_error = vec![Diagnostic {
+                    severity: Severity::Error,
+                    message: format!("cannot read {}: {e}", path.display()),
+                    line: 1,
+                    column: 1,
+                }];
+            }
+        }
     }
 
     /// Every problem worth showing a host, worst first.
