@@ -63,6 +63,10 @@ pub struct Model {
     /// reads these off disk beside `layout.kdl`; a reflection receives them
     /// from its primary and never reads its own.
     assets: layout::assets::Assets,
+    /// Result of the last import attempt, shown in settings until the next
+    /// one. Lives on the model rather than in the dialog because the portal
+    /// thread outlives the dialog that started it.
+    layout_import: Option<(String, Vec<String>)>,
     inhibitor: inhibitor::Inhibitor,
     /// Listener forwarding the active backend's events into the model.
     spotify_task: Option<TaskHandle>,
@@ -130,6 +134,7 @@ impl Model {
             connected: true,
             layout,
             assets,
+            layout_import: None,
             inhibitor: inhibitor::Inhibitor::new(),
             spotify_task: None,
             layout_task: None,
@@ -407,6 +412,58 @@ fn forget_primary(mut model: State<Model>) {
         m.pairing.paired_primary = None;
     }
     rebuild_backend(model);
+}
+
+/// Open the file-chooser portal and install whatever the host picks.
+///
+/// The portal call happens on its own thread; this only forwards the outcome
+/// into the model. `spawn_forever` because the settings dialog unmounts as
+/// soon as the chooser takes focus, and the result still has to land.
+fn import_layout(model: State<Model>) {
+    let (tx, rx) = async_channel::bounded(1);
+    layout::import::import(tx);
+    spawn_forever(async move {
+        let mut model = model;
+        let Ok(outcome) = rx.recv().await else {
+            return;
+        };
+        let installed = matches!(outcome, layout::import::Outcome::Installed { .. });
+        let (summary, details) = layout::import::describe(&outcome);
+
+        let mut m = model.write();
+        if installed {
+            m.layout.reload();
+            publish_layout(&mut m);
+        }
+        m.layout_import = (!summary.is_empty()).then_some((summary, details));
+    });
+}
+
+/// Open an image-filtered chooser for one `image` path the document names but
+/// the config directory does not have.
+///
+/// Same thread-and-channel shape as [`import_layout`], and the same reason for
+/// `spawn_forever`: the settings dialog unmounts as soon as the chooser takes
+/// focus, and the result still has to land.
+fn locate_asset(model: State<Model>, target: String) {
+    let (tx, rx) = async_channel::bounded(1);
+    layout::import::locate(target, tx);
+    spawn_forever(async move {
+        let mut model = model;
+        let Ok(outcome) = rx.recv().await else {
+            return;
+        };
+        let located = matches!(outcome, layout::import::Outcome::Located { .. });
+        let (summary, details) = layout::import::describe(&outcome);
+
+        let mut m = model.write();
+        if located {
+            // The document has not changed, only what is beside it — so this
+            // re-reads the assets and re-broadcasts rather than re-parsing.
+            publish_layout(&mut m);
+        }
+        m.layout_import = (!summary.is_empty()).then_some((summary, details));
+    });
 }
 
 /// Re-read `layout.kdl` now rather than waiting for the poll interval.
