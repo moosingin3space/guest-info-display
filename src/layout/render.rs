@@ -137,7 +137,7 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
         }
         // Asset mirroring is a later ticket; until then an `image` node is an
         // honest placeholder rather than a missing element.
-        Widget::Image { path, fit } => image_placeholder(path, *fit, &n.style, parent, ctx).into(),
+        Widget::Image { path, fit } => image(path, *fit, &n.style, parent, ctx).into(),
         Widget::RoleLabel => role_label(&n.style, parent, ctx).into(),
         Widget::SettingsButton { size } => settings_button(*size, ctx).into(),
     };
@@ -415,30 +415,53 @@ fn wifi_qr(heading: &str, size: f32, style: &Style, parent: Direction, ctx: &Ctx
         .child(boxed)
 }
 
-fn image_placeholder(
-    path: &str,
-    _fit: Fit,
-    style: &Style,
-    parent: Direction,
-    ctx: &Ctx<'_>,
-) -> Rect {
-    apply_box(
-        rect()
-            .corner_radius(12.)
-            .overflow(Overflow::Clip)
-            .background(rgba(ctx.theme.placeholder)),
-        style,
-        parent,
-        BoxDefaults {
-            main_align: Some(Align::Center),
-            cross_align: Some(Align::Center),
-            ..BoxDefaults::default()
-        },
-    )
-    .child(
-        label()
-            .color(rgba(ctx.theme.muted_text))
-            .text(path.to_string()),
+/// An `image` node: the host's own picture, or a box naming the file that is
+/// not there.
+///
+/// The placeholder is deliberately not an error state. On a reflection it is
+/// the normal first few seconds after a cold boot — the layout is persisted
+/// but the bytes are not, so they arrive on the next subscribe — and on a
+/// primary it is a filename the host can fix from settings.
+fn image(path: &str, fit: Fit, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
+    // Clip matters for `cover`: the image is scaled up until it fills the box,
+    // and the overflow has to go somewhere.
+    let base = rect().corner_radius(12.).overflow(Overflow::Clip);
+
+    let Some(asset) = ctx.model.assets.get(path) else {
+        return apply_box(
+            base.background(rgba(ctx.theme.placeholder)),
+            style,
+            parent,
+            BoxDefaults {
+                main_align: Some(Align::Center),
+                cross_align: Some(Align::Center),
+                ..BoxDefaults::default()
+            },
+        )
+        .child(
+            label()
+                .color(rgba(ctx.theme.muted_text))
+                .text(path.to_string()),
+        );
+    };
+
+    // `Max` scales until the box is covered and crops; `Min` scales until the
+    // whole image fits. Centring only bites under `Max`, where there is
+    // overflow to distribute, but setting it unconditionally is harmless and
+    // saves a branch.
+    let aspect = match fit {
+        Fit::Cover => AspectRatio::Max,
+        Fit::Contain => AspectRatio::Min,
+    };
+
+    // The key carries the content fingerprint, not just the path: Freya hashes
+    // only what we hand it, so a replaced file at an unchanged path would
+    // otherwise keep rendering the image it decoded the first time.
+    apply_box(base, style, parent, BoxDefaults::default()).child(
+        ImageViewer::new(((path, asset.fingerprint), asset.bytes.clone()))
+            .expanded()
+            .aspect_ratio(aspect)
+            .image_cover(ImageCover::Center),
     )
 }
 

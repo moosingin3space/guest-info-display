@@ -11,8 +11,9 @@ use std::time::{Duration, SystemTime};
 
 use freya::prelude::State;
 
-use super::{Source, layout_path};
+use super::layout_path;
 use crate::Model;
+use crate::persistence::Role;
 
 /// Slow enough to be free, fast enough that a host tabbing back to the screen
 /// after a save sees the change already applied.
@@ -68,7 +69,13 @@ impl Watcher {
 }
 
 /// Watch the layout file for the lifetime of the app, applying every change.
-pub async fn run(mut model: State<Model>) {
+///
+/// Reflections take their layout from their primary, so changes are ignored
+/// while the role is reflection. The check is per tick rather than at startup
+/// so a live role switch is picked up without restarting the task — and the
+/// poll still runs, so a file edited while in reflection role is already
+/// stamped and won't re-fire on the switch back.
+pub async fn run(model: State<Model>) {
     let mut watcher = Watcher::new(layout_path());
 
     loop {
@@ -78,17 +85,21 @@ pub async fn run(mut model: State<Model>) {
             continue;
         };
 
+        if !matches!(model.peek().role, Role::Primary) {
+            continue;
+        }
+
         match change {
             Change::Updated(source) => {
                 log::info!("layout: {} changed, reloading", watcher.path.display());
-                model.write().layout.apply(&source, Source::File);
+                crate::apply_layout_source(model, &source);
             }
             Change::Removed => {
                 log::info!(
                     "layout: {} is gone, falling back to the built-in layout",
                     watcher.path.display()
                 );
-                model.write().layout.use_built_in();
+                crate::use_built_in_layout(model);
             }
             Change::Unreadable(e) => {
                 // Keep whatever is on screen: an unreadable file is no reason to

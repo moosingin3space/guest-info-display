@@ -67,6 +67,26 @@ pub enum WireMessage {
     CoverArt { url: String, encoded: Vec<u8> },
     /// Session ended on the primary — drop any cached artwork.
     CoversCleared,
+    /// The primary's active layout, as validated KDL source.
+    ///
+    /// Source text rather than a serialised tree: both ends run the same
+    /// binary and therefore the same parser, so shipping text means one parse
+    /// implementation, one set of diagnostics, and a wire that does not change
+    /// every time a widget is added. The primary only ever sends source it has
+    /// already parsed, so a reflection failing to parse it means version skew.
+    Layout { source: String },
+
+    /// Encoded bytes behind one `image` node of the current layout.
+    ///
+    /// Keyed by the layout-relative path the node names, not by a content
+    /// hash: the renderer already looks assets up by path, so hashing would
+    /// only buy an indirection and the dedup of two nodes naming the same
+    /// file, which the path key gives for free.
+    ///
+    /// Sent immediately after the `Layout` it belongs to, and replayed on
+    /// every subscribe — reflections do not persist assets, so a cold boot
+    /// shows placeholders until these arrive.
+    Asset { path: String, encoded: Vec<u8> },
 }
 
 #[cfg(test)]
@@ -99,6 +119,13 @@ mod tests {
                 encoded: vec![0xff, 0xd8, 0xff, 0xe0],
             },
             WireMessage::CoversCleared,
+            WireMessage::Layout {
+                source: "root { clock }".into(),
+            },
+            WireMessage::Asset {
+                path: "ana.jpg".into(),
+                encoded: vec![0x89, 0x50, 0x4e, 0x47],
+            },
         ];
 
         for original in cases {

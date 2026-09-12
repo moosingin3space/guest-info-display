@@ -7,10 +7,14 @@
 //! - [`parse`] — KDL source into [`schema`], collecting [`Diagnostic`]s.
 //! - `render` — [`schema`] into Freya elements, given a `Model`.
 //!
+//! [`assets`] sits alongside them, holding the image bytes an `image` node
+//! names: read from disk on a primary, received over the wire on a reflection.
+//!
 //! The governing rule for everything below is **render what you can, report
 //! what you can't**: a party display with one mistyped widget shows the rest of
 //! the party's layout, not a stack trace.
 
+pub mod assets;
 pub mod parse;
 pub mod render;
 pub mod schema;
@@ -77,6 +81,10 @@ pub enum Source {
     BuiltIn,
     /// The host's `layout.kdl`.
     File,
+    /// Pushed over the wire by the paired primary. A reflection has no say in
+    /// its own layout — deliberately, so there is one place to change how the
+    /// party looks.
+    Mirrored,
 }
 
 /// An active layout, plus whatever was wrong with the document that produced
@@ -87,6 +95,10 @@ pub struct Active {
     pub doc: LayoutDoc,
     pub diagnostics: Vec<Diagnostic>,
     pub source: Source,
+    /// The KDL this was parsed from. Kept because a primary mirrors it
+    /// verbatim to its reflections and a reflection persists it across
+    /// reboots.
+    pub text: String,
 }
 
 /// The layout half of the model: what is rendering, and why it might not be
@@ -100,15 +112,34 @@ pub struct LayoutState {
 }
 
 impl LayoutState {
-    /// Read `layout.kdl` if it is there. A missing file is the normal state on
-    /// a fresh install, not an error, so it produces no diagnostics.
-    pub fn startup() -> Self {
+    /// The layout to start with.
+    ///
+    /// A primary reads `layout.kdl`; a missing file is the normal state on a
+    /// fresh install, not an error, so it produces no diagnostics. A reflection
+    /// takes whatever its primary sent last — persisted, so a reboot before the
+    /// primary comes up still shows the party's colours rather than flashing
+    /// the built-in default — and ignores any local file entirely.
+    pub fn startup(primary: bool, mirrored: Option<String>) -> Self {
         let mut state = Self {
             active: built_in(),
             load_error: Vec::new(),
         };
-
         let path = layout_path();
+
+        if !primary {
+            if path.exists() {
+                log::info!(
+                    "layout: ignoring {} — reflections take their layout from their primary",
+                    path.display()
+                );
+            }
+            match mirrored {
+                Some(source) => state.apply(&source, Source::Mirrored),
+                None => log::info!("layout: nothing mirrored yet, using the built-in layout"),
+            }
+            return state;
+        }
+
         match std::fs::read_to_string(&path) {
             Ok(source) => state.apply(&source, Source::File),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -131,6 +162,7 @@ impl LayoutState {
         match load(source) {
             Ok(mut active) => {
                 active.source = from;
+                active.text = source.to_string();
                 for d in &active.diagnostics {
                     log::warn!("layout: {d}");
                 }
@@ -191,6 +223,7 @@ fn built_in() -> Active {
         doc: default_doc().clone(),
         diagnostics: Vec::new(),
         source: Source::BuiltIn,
+        text: DEFAULT_SOURCE.to_string(),
     }
 }
 
@@ -235,6 +268,7 @@ pub fn load(source: &str) -> Result<Active, Vec<Diagnostic>> {
         },
         diagnostics: parsed.diagnostics,
         source: Source::File,
+        text: source.to_string(),
     })
 }
 
@@ -360,6 +394,29 @@ mod tests {
         ));
 
         assert!(matches!(children[2].widget, Widget::RoleLabel));
+    }
+
+    #[test]
+    fn a_reflection_ignores_its_own_layout_file() {
+        // Whatever is on disk, a reflection starts from what was mirrored.
+        let state = LayoutState::startup(false, Some("root { clock }".to_string()));
+        assert_eq!(state.active.source, Source::Mirrored);
+        assert_ne!(state.active.doc.root, default_doc().root);
+
+        // And with nothing mirrored yet, the built-in, not the local file.
+        let state = LayoutState::startup(false, None);
+        assert_eq!(state.active.source, Source::BuiltIn);
+    }
+
+    #[test]
+    fn active_text_round_trips_for_mirroring() {
+        let source = "root { clock format=\"%H:%M\" }";
+        let mut state = LayoutState::default();
+        state.apply(source, Source::File);
+        assert_eq!(
+            state.active.text, source,
+            "the primary mirrors this verbatim"
+        );
     }
 
     #[test]

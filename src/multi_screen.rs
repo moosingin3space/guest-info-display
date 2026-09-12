@@ -41,7 +41,13 @@ use crate::spotify::{self, SharedSpotifyState, SpotifyState};
 
 /// ALPN identifying our irpc service. Bumped when the protocol breaks
 /// compatibility — keep this in sync with the spec's "service version" notion.
-pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/1";
+///
+/// `/2` added `WireMessage::Layout`; `/3` added `WireMessage::Asset`. Postcard
+/// rejects an unknown discriminant, so an un-upgraded reflection cannot decode
+/// either; bumping the ALPN means it fails to connect at all and shows
+/// "Primary unavailable", which is a diagnosable failure rather than a
+/// mysterious one. Both ends must be updated together.
+pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/3";
 
 /// Cross-runtime broadcast tunnel: GPUI thread pushes events synchronously,
 /// the multi-screen runtime drains them and fans them out to subscribers.
@@ -52,6 +58,13 @@ enum BroadcastEvent {
         encoded: Vec<u8>,
     },
     CoversCleared,
+    /// A document and every image it names, together. One event rather than
+    /// two so the cache can never hold a layout whose assets belong to the
+    /// document before it.
+    Layout {
+        source: String,
+        assets: Vec<(String, Vec<u8>)>,
+    },
 }
 
 /// Approval request surfaced to the GPUI side when an unknown peer calls
@@ -69,6 +82,7 @@ enum Command {
         primary: EndpointId,
         state: SharedSpotifyState,
         events_tx: AsyncSender<spotify::Event>,
+        layouts_tx: AsyncSender<LayoutUpdate>,
         shutdown_rx: oneshot::Receiver<()>,
     },
     RequestPairing {
@@ -82,11 +96,28 @@ enum Command {
     DisconnectSubscriber(EndpointId),
 }
 
+/// What a reflection receives about its layout.
+///
+/// Assets ride the same channel as the document because they are the same
+/// concern — what the screen looks like — and because the ordering matters:
+/// the document arrives first and tells the reflection which images to expect.
+#[derive(Debug)]
+pub enum LayoutUpdate {
+    /// Validated KDL source. Replaces whatever is rendering.
+    Document(String),
+    /// Bytes for one `image` path in the document that came before it.
+    Asset { path: String, encoded: Vec<u8> },
+}
+
 /// Hands the GPUI side a primary-mirroring backend that produces the same
 /// (state, events) pair as `spotify::start` would. Drop releases the dial loop.
 pub struct ReflectionHandle {
     pub state: SharedSpotifyState,
     pub events: AsyncReceiver<spotify::Event>,
+    /// Layout documents and their images, pushed by the primary. A channel of
+    /// its own rather than another `spotify::Event` variant: this carries no
+    /// playback state, and only a reflection ever has one.
+    pub layouts: AsyncReceiver<LayoutUpdate>,
     _shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -116,6 +147,15 @@ pub(crate) struct Subscriber {
 struct Shared {
     subscribers: Mutex<Vec<Subscriber>>,
     last_state: Mutex<SpotifyState>,
+    /// The primary's active layout source, replayed to every new subscriber
+    /// before its first snapshot so a reflection never flashes the built-in
+    /// layout before switching to the real one.
+    last_layout: Mutex<Option<String>>,
+    /// Encoded image bytes for the layout in `last_layout`, keyed by the path
+    /// the `image` node names. Replaced wholesale with the layout so the two
+    /// never disagree; not persisted anywhere, since a reflection re-fetches
+    /// them on its next subscribe.
+    layout_assets: Mutex<Vec<(String, Vec<u8>)>>,
     /// Encoded JPEG/PNG bytes keyed by Spotify cover URL. Populated each time
     /// a primary fetches a cover; cleared on session reset.
     cover_cache: Mutex<HashMap<String, Vec<u8>>>,
@@ -127,6 +167,8 @@ impl Shared {
         Arc::new(Self {
             subscribers: Mutex::new(Vec::new()),
             last_state: Mutex::new(SpotifyState::default()),
+            last_layout: Mutex::new(None),
+            layout_assets: Mutex::new(Vec::new()),
             cover_cache: Mutex::new(HashMap::new()),
             inbound_trusted,
         })
@@ -176,6 +218,15 @@ impl MultiScreenHandle {
 
     pub fn broadcast_covers_cleared(&self) {
         let _ = self.broadcast_tx.try_send(BroadcastEvent::CoversCleared);
+    }
+
+    /// Push the primary's layout to every live reflection, and cache it for
+    /// ones that subscribe later. Called whenever the active document changes:
+    /// startup, a hot reload, an import, a reload button, a role switch.
+    pub fn broadcast_layout(&self, source: String, assets: Vec<(String, Vec<u8>)>) {
+        let _ = self
+            .broadcast_tx
+            .try_send(BroadcastEvent::Layout { source, assets });
     }
 
     /// Replace the set of endpoints that the primary accepts `Subscribe`
@@ -238,12 +289,17 @@ impl MultiScreenHandle {
     pub fn start_reflection(&self, primary: EndpointId) -> ReflectionHandle {
         let state: SharedSpotifyState = Arc::new(std::sync::Mutex::new(SpotifyState::default()));
         let (events_tx, events_rx) = async_channel::bounded::<spotify::Event>(16);
+        // Roomier than the old document-only channel: one layout now arrives
+        // as the document plus a message per image, and the sender blocks
+        // rather than dropping, so a narrow channel just stalls the session.
+        let (layouts_tx, layouts_rx) = async_channel::bounded::<LayoutUpdate>(16);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let cmd = Command::StartReflection {
             primary,
             state: state.clone(),
             events_tx,
+            layouts_tx,
             shutdown_rx,
         };
         if self.cmd_tx.try_send(cmd).is_err() {
@@ -253,6 +309,7 @@ impl MultiScreenHandle {
         ReflectionHandle {
             state,
             events: events_rx,
+            layouts: layouts_rx,
             _shutdown: Some(shutdown_tx),
         }
     }
@@ -367,6 +424,7 @@ async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint, shared: Ar
                 primary,
                 state,
                 events_tx,
+                layouts_tx,
                 shutdown_rx,
             } => {
                 tokio::spawn(reflection::run(
@@ -374,6 +432,7 @@ async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint, shared: Ar
                     primary,
                     state,
                     events_tx,
+                    layouts_tx,
                     shutdown_rx,
                 ));
             }
@@ -432,24 +491,44 @@ async fn build_router(
 /// rather than wedge the broadcast.
 async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) {
     while let Ok(event) = rx.recv().await {
-        let wire = match event {
+        // A layout fans out into the document plus one message per image, so
+        // every event produces a batch. Each subscriber takes the whole batch
+        // or is dropped part-way through and reconnects for a fresh replay.
+        let wires: Vec<WireMessage> = match event {
             BroadcastEvent::StateChanged(state) => {
                 if let Ok(mut guard) = shared.last_state.lock() {
                     *guard = state.clone();
                 }
-                WireMessage::StateChanged(state)
+                vec![WireMessage::StateChanged(state)]
             }
             BroadcastEvent::CoverArt { url, encoded } => {
                 if let Ok(mut guard) = shared.cover_cache.lock() {
                     guard.insert(url.clone(), encoded.clone());
                 }
-                WireMessage::CoverArt { url, encoded }
+                vec![WireMessage::CoverArt { url, encoded }]
             }
             BroadcastEvent::CoversCleared => {
                 if let Ok(mut guard) = shared.cover_cache.lock() {
                     guard.clear();
                 }
-                WireMessage::CoversCleared
+                vec![WireMessage::CoversCleared]
+            }
+            BroadcastEvent::Layout { source, assets } => {
+                if let Ok(mut guard) = shared.last_layout.lock() {
+                    *guard = Some(source.clone());
+                }
+                if let Ok(mut guard) = shared.layout_assets.lock() {
+                    *guard = assets.clone();
+                }
+                // Document first: a reflection sizes its expectations from the
+                // document, so an asset arriving ahead of it has nowhere to go.
+                std::iter::once(WireMessage::Layout { source })
+                    .chain(
+                        assets
+                            .into_iter()
+                            .map(|(path, encoded)| WireMessage::Asset { path, encoded }),
+                    )
+                    .collect()
             }
         };
 
@@ -459,20 +538,22 @@ async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) 
         };
 
         let mut survivors = Vec::with_capacity(subscribers.len());
-        for sub in subscribers {
-            // try_send is non-blocking: returns immediately whether the
-            // message was buffered or not, only erroring on closed channel.
-            // That matches the spec's "drop slow subscribers" rule — they
-            // reconnect for a fresh snapshot rather than wedge the broadcast.
-            match sub.sender.try_send(wire.clone()).await {
-                Ok(_) => survivors.push(sub),
-                Err(e) => {
+        'subscriber: for sub in subscribers {
+            for wire in &wires {
+                // try_send is non-blocking: returns immediately whether the
+                // message was buffered or not, only erroring on closed channel.
+                // That matches the spec's "drop slow subscribers" rule — they
+                // reconnect for a fresh snapshot rather than wedge the
+                // broadcast.
+                if let Err(e) = sub.sender.try_send(wire.clone()).await {
                     log::debug!(
                         "multi_screen: dropping subscriber {}: {e:?}",
                         sub.endpoint_id.fmt_short()
                     );
+                    continue 'subscriber;
                 }
             }
+            survivors.push(sub);
         }
 
         if let Ok(mut guard) = shared.subscribers.lock() {
