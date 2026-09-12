@@ -1,0 +1,41 @@
+// A guest room or spare-bedroom panel: the time, the date, and how to get on
+// the Wi-Fi. No Spotify widgets at all, so nothing on the screen changes when
+// somebody starts playing music downstairs.
+//
+// Lighter than the built-in layout, on the assumption this one sits in a room
+// where people sleep.
+
+theme {
+    background {
+        gradient to="bottom" {
+            stop "#101c2b" 0
+            stop "#1d3347" 100
+        }
+    }
+
+    surface        "#ffffff12"
+    surface-border "#ffffff20"
+    text           "#eaf2f8"
+    muted-text     "#eaf2f899"
+
+    mono-font-family "Adwaita Mono"
+}
+
+root {
+    column width="fill" flex=1 padding=48 spacing=32 main-align="center" cross-align="center" {
+        clock font-size=96 weight="bold" mono=#true format="%H:%M"
+        date font-size=26 color="#eaf2f8cc" format="%A, %-d %B"
+
+        card width=420 padding=32 spacing=16 cross-align="center" when="wifi-configured" {
+            wifi-qr size=240 heading="Guest Wi-Fi"
+        }
+
+        // Said out loud rather than left as an empty box, so the screen is
+        // never just mysteriously blank in the middle.
+        text "Wi-Fi is not set up yet" font-size=18 align="center" when="wifi-unconfigured"
+    }
+
+    row width="fill" padding="0 24 16 24" main-align="end" {
+        settings-button size=20
+    }
+}
