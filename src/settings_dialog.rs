@@ -255,8 +255,9 @@ fn field(title: &'static str, control: impl Into<Element>) -> Rect {
 /// its primary, so an import or reload button here would imply otherwise.
 fn layout_section(model: State<Model>, role: Role) -> Rect {
     let mut confirm_copy = use_state(|| false);
+    let mut confirm_import = use_state(|| false);
 
-    let (status, problems, missing_assets, has_file) = {
+    let (status, problems, missing_assets, has_file, import_note) = {
         let m = model.read();
         let state = &m.layout;
         let status = if !state.load_error.is_empty() {
@@ -290,6 +291,7 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
             problems,
             missing_assets,
             state.active.source == layout::Source::File,
+            m.layout_import.clone(),
         )
     };
 
@@ -325,21 +327,57 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
 
     if !missing_assets.is_empty() {
         section = section
-            .child(
-                label()
-                    .font_size(13.)
-                    .text(format!("{} — showing placeholders", missing(missing_assets.len()))),
-            )
-            .child(rect().width(Size::fill()).spacing(2.).children(
+            .child(label().font_size(13.).text(format!(
+                "{} — showing placeholders",
+                missing(missing_assets.len())
+            )))
+            .child(rect().width(Size::fill()).spacing(4.).children(
                 missing_assets.into_iter().map(|(path, why)| {
-                    label()
+                    // `Content::flex()` is what makes the label's `flex(1.)`
+                    // resolve; without it the label takes the full width and
+                    // shoves the button outside the dialog.
+                    let row = rect()
                         .width(Size::fill())
-                        .font_size(12.)
-                        .color(MUTED)
-                        .text(format!("{path} — {why}"))
+                        .horizontal()
+                        .content(Content::flex())
+                        .cross_align(Alignment::Center)
+                        .spacing(8.)
+                        .child(
+                            label()
+                                .width(Size::flex(1.))
+                                .font_size(12.)
+                                .color(MUTED)
+                                .text(format!("{path} — {why}")),
+                        );
+                    // Only a primary owns the files. On a reflection the image
+                    // is the primary's to supply, and a button here would
+                    // promise otherwise.
+                    if role == Role::Primary {
+                        row.child(
+                            Button::new()
+                                .outline()
+                                .on_press(move |_| crate::locate_asset(model, path.clone()))
+                                .child("Locate…"),
+                        )
                         .into()
+                    } else {
+                        row.into()
+                    }
                 }),
             ));
+    }
+
+    if let Some((summary, details)) = import_note {
+        section = section
+            .child(label().font_size(12.).text(summary))
+            .children(details.into_iter().map(|d| {
+                label()
+                    .width(Size::fill())
+                    .font_size(12.)
+                    .color(MUTED)
+                    .text(d)
+                    .into()
+            }));
     }
 
     if role == Role::Reflection {
@@ -347,15 +385,37 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
     }
 
     let copying = *confirm_copy.read();
+    let importing = *confirm_import.read();
     section.child(
         rect()
             .horizontal()
             .spacing(8.)
             .child(
                 Button::new()
+                    .filled()
+                    .on_press(move |_| {
+                        // Replacing a hand-edited file deserves a second press,
+                        // asked before the chooser opens rather than after.
+                        if importing || !has_file {
+                            confirm_import.set(false);
+                            crate::import_layout(model);
+                        } else {
+                            confirm_import.set(true);
+                            confirm_copy.set(false);
+                        }
+                    })
+                    .child(if importing {
+                        "Replace layout.kdl?"
+                    } else {
+                        "Import folder…"
+                    }),
+            )
+            .child(
+                Button::new()
                     .outline()
                     .on_press(move |_| {
                         confirm_copy.set(false);
+                        confirm_import.set(false);
                         crate::reload_layout(model);
                     })
                     .child("Reload"),
@@ -370,6 +430,7 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
                             crate::copy_default_layout(model);
                         } else {
                             confirm_copy.set(true);
+                            confirm_import.set(false);
                         }
                     })
                     .child(if copying {
