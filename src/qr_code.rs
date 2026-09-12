@@ -50,7 +50,8 @@ pub fn wifi_qr_element(creds: &WifiCredentials) -> Element {
         paint.set_anti_alias(false);
 
         paint.set_color(Color::WHITE);
-        ctx.canvas.draw_rect(SkRect::from_xywh(0., 0., w, h), &paint);
+        ctx.canvas
+            .draw_rect(SkRect::from_xywh(0., 0., w, h), &paint);
 
         paint.set_color(Color::BLACK);
         for row in 0..qr.size() {
