@@ -14,14 +14,50 @@
 pub mod parse;
 pub mod render;
 pub mod schema;
+pub mod watch;
 
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use schema::{LayoutDoc, Node};
 
+/// Same application id the database uses, under the *config* directory rather
+/// than the data one. The database is app state; the layout is user-authored
+/// input, and mixing them makes "delete my settings" ambiguous.
+const APP_DIR: &str = "xyz.mooshq.GuestInfoDisplay";
+const LAYOUT_FILENAME: &str = "layout.kdl";
+
+/// `$XDG_CONFIG_HOME/xyz.mooshq.GuestInfoDisplay`, falling back to
+/// `~/.config/…`. Inside the Flatpak sandbox this is
+/// `~/.var/app/xyz.mooshq.GuestInfoDisplay/config`, which the app already owns
+/// — no `--filesystem=` grant is needed to read or write here.
+pub fn config_dir() -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").expect("HOME must be set")).join(".config")
+        });
+    base.join(APP_DIR)
+}
+
+pub fn layout_path() -> PathBuf {
+    config_dir().join(LAYOUT_FILENAME)
+}
+
 /// The built-in layout, embedded rather than written in Rust so there is only
 /// one renderer and the default doubles as a worked example.
 const DEFAULT_SOURCE: &str = include_str!("../../assets/default-layout.kdl");
+
+/// Where the layout on screen came from. Surfaced in settings so a host can
+/// tell "my file is loaded" from "my file is broken and you're seeing the
+/// default".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// `assets/default-layout.kdl`, compiled in.
+    BuiltIn,
+    /// The host's `layout.kdl`.
+    File,
+}
 
 /// An active layout, plus whatever was wrong with the document that produced
 /// it. Diagnostics travel with the document because settings shows them next
@@ -30,6 +66,92 @@ const DEFAULT_SOURCE: &str = include_str!("../../assets/default-layout.kdl");
 pub struct Active {
     pub doc: LayoutDoc,
     pub diagnostics: Vec<Diagnostic>,
+    pub source: Source,
+}
+
+/// The layout half of the model: what is rendering, and why it might not be
+/// what is on disk.
+#[derive(Debug, Clone)]
+pub struct LayoutState {
+    pub active: Active,
+    /// Fatal diagnostics from the most recent failed load. The active document
+    /// is whatever was good last; these say why it is not the file on disk.
+    pub load_error: Vec<Diagnostic>,
+}
+
+impl LayoutState {
+    /// Read `layout.kdl` if it is there. A missing file is the normal state on
+    /// a fresh install, not an error, so it produces no diagnostics.
+    pub fn startup() -> Self {
+        let mut state = Self {
+            active: built_in(),
+            load_error: Vec::new(),
+        };
+
+        let path = layout_path();
+        match std::fs::read_to_string(&path) {
+            Ok(source) => state.apply(&source, Source::File),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log::info!("layout: no {}, using the built-in layout", path.display());
+            }
+            Err(e) => {
+                log::warn!("layout: cannot read {}: {e}", path.display());
+            }
+        }
+        state
+    }
+
+    /// Parse `source` and, if it is usable, put it on screen.
+    ///
+    /// A fatal document changes nothing that is rendering — the running display
+    /// keeps the last good layout and only the error record moves. That is the
+    /// whole safety argument for hot reload: a half-typed file in an editor
+    /// cannot produce a half-broken screen.
+    pub fn apply(&mut self, source: &str, from: Source) {
+        match load(source) {
+            Ok(mut active) => {
+                active.source = from;
+                for d in &active.diagnostics {
+                    log::warn!("layout: {d}");
+                }
+                self.active = active;
+                self.load_error.clear();
+            }
+            Err(diagnostics) => {
+                for d in &diagnostics {
+                    log::warn!("layout: {d}");
+                }
+                self.load_error = diagnostics;
+            }
+        }
+    }
+
+    pub fn use_built_in(&mut self) {
+        self.active = built_in();
+        self.load_error.clear();
+    }
+
+    /// Every problem worth showing a host, worst first.
+    pub fn problems(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.load_error.iter().chain(&self.active.diagnostics)
+    }
+}
+
+impl Default for LayoutState {
+    fn default() -> Self {
+        Self {
+            active: built_in(),
+            load_error: Vec::new(),
+        }
+    }
+}
+
+fn built_in() -> Active {
+    Active {
+        doc: default_doc().clone(),
+        diagnostics: Vec::new(),
+        source: Source::BuiltIn,
+    }
 }
 
 /// The built-in document, parsed once.
@@ -72,6 +194,7 @@ pub fn load(source: &str) -> Result<Active, Vec<Diagnostic>> {
             root: parsed.root.unwrap_or_else(default_root),
         },
         diagnostics: parsed.diagnostics,
+        source: Source::File,
     })
 }
 
@@ -197,6 +320,23 @@ mod tests {
         ));
 
         assert!(matches!(children[2].widget, Widget::RoleLabel));
+    }
+
+    #[test]
+    fn a_fatal_document_leaves_the_running_layout_alone() {
+        let mut state = LayoutState::default();
+        state.apply("root { text \"party\" }", Source::File);
+        let good = state.active.doc.clone();
+        assert_eq!(state.active.source, Source::File);
+
+        // Half-typed, as an editor would leave it mid-save.
+        state.apply("root { text ", Source::File);
+        assert_eq!(state.active.doc, good, "the screen must not change");
+        assert!(!state.load_error.is_empty(), "but the failure is recorded");
+
+        // And a good document clears the error.
+        state.apply("root { clock }", Source::File);
+        assert!(state.load_error.is_empty());
     }
 
     #[test]
