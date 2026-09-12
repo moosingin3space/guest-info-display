@@ -55,6 +55,10 @@ pub struct Model {
     /// a snapshot recently. `false` after the session drops; flipped back to
     /// `true` on the next snapshot. Always `true` in primary role.
     connected: bool,
+    /// Active layout document, plus anything wrong with the file that produced
+    /// it. Owned by the model so a hot reload is just a `write()` away from a
+    /// re-render.
+    layout: layout::LayoutState,
     inhibitor: inhibitor::Inhibitor,
     /// Listener forwarding the active backend's events into the model.
     spotify_task: Option<TaskHandle>,
@@ -101,6 +105,7 @@ impl Model {
             covers: HashMap::new(),
             is_playing: false,
             connected: true,
+            layout: layout::LayoutState::startup(),
             inhibitor: inhibitor::Inhibitor::new(),
             spotify_task: None,
         }
@@ -272,6 +277,9 @@ fn pair_with(model: State<Model>, primary_id: EndpointId) {
                 direction: persistence::Direction::Outbound,
             });
         }
+        // Watches layout.kdl for the lifetime of the app.
+        spawn(layout::watch::run(model));
+
         rebuild_backend(model);
     });
 }
@@ -429,6 +437,9 @@ fn app() -> impl IntoElement {
             }
         });
 
+        // Watches layout.kdl for the lifetime of the app.
+        spawn(layout::watch::run(model));
+
         rebuild_backend(model);
     });
 
@@ -438,7 +449,7 @@ fn app() -> impl IntoElement {
     // Everything a guest sees comes from the layout document. The popups below
     // are chrome: always present, never configurable, so a layout can't lay
     // the settings dialog out of existence.
-    layout::render::render(layout::default_doc(), &m, *now.read(), settings_open)
+    layout::render::render(&m.layout.active.doc, &m, *now.read(), settings_open)
         .child(approval)
         .child(
             Popup::new()
