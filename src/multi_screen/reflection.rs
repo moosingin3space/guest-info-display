@@ -100,11 +100,8 @@ async fn run_session(
     state: &SharedSpotifyState,
     events_tx: &AsyncSender<Event>,
 ) -> Result<SessionEnd, Box<dyn std::error::Error + Send + Sync>> {
-    let client = irpc_iroh::client::<DisplayProtocol>(
-        endpoint.clone(),
-        EndpointAddr::new(primary),
-        ALPN,
-    );
+    let client =
+        irpc_iroh::client::<DisplayProtocol>(endpoint.clone(), EndpointAddr::new(primary), ALPN);
     let mut rx = client
         .server_streaming(
             SubscribeRequest {

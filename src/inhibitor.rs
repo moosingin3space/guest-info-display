@@ -61,7 +61,10 @@ async fn run(rx: Receiver<bool>) {
         match (want, current.is_some()) {
             (true, false) => {
                 let options = InhibitOptions::default().set_reason(INHIBIT_REASON);
-                match proxy.inhibit(None, InhibitFlags::Idle.into(), options).await {
+                match proxy
+                    .inhibit(None, InhibitFlags::Idle.into(), options)
+                    .await
+                {
                     Ok(req) => current = Some(req),
                     Err(e) => log::warn!("inhibitor: failed to acquire inhibit: {e}"),
                 }

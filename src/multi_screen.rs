@@ -47,7 +47,10 @@ pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/1";
 /// the multi-screen runtime drains them and fans them out to subscribers.
 enum BroadcastEvent {
     StateChanged(SpotifyState),
-    CoverArt { url: String, encoded: Vec<u8> },
+    CoverArt {
+        url: String,
+        encoded: Vec<u8>,
+    },
     CoversCleared,
 }
 
@@ -160,7 +163,9 @@ impl MultiScreenHandle {
     /// Push a state change to every live subscriber. Cheap: just pushes onto
     /// a bounded async channel; the multi-screen runtime does the real work.
     pub fn broadcast_state(&self, state: SpotifyState) {
-        let _ = self.broadcast_tx.try_send(BroadcastEvent::StateChanged(state));
+        let _ = self
+            .broadcast_tx
+            .try_send(BroadcastEvent::StateChanged(state));
     }
 
     pub fn broadcast_cover(&self, url: String, encoded: Vec<u8>) {
@@ -198,7 +203,11 @@ impl MultiScreenHandle {
     /// [`remove_inbound_trusted`] when the user removes a reflection so the
     /// stream closes immediately and the reflection can't reconnect.
     pub fn disconnect_subscriber(&self, id: EndpointId) {
-        if self.cmd_tx.try_send(Command::DisconnectSubscriber(id)).is_err() {
+        if self
+            .cmd_tx
+            .try_send(Command::DisconnectSubscriber(id))
+            .is_err()
+        {
             log::warn!("multi_screen: command channel full — disconnect dropped");
         }
     }
@@ -277,16 +286,18 @@ pub fn start(secret_key: SecretKey) -> MultiScreenHandle {
                 .enable_all()
                 .build()
                 .expect("multi-screen tokio runtime");
-            rt.block_on(MultiScreenRuntime {
-                secret_key,
-                shutdown: shutdown_rx,
-                broadcast_rx,
-                approvals_tx,
-                discovered_tx,
-                cmd_rx,
-                inbound_trusted: inbound_trusted_run,
-            }
-            .run());
+            rt.block_on(
+                MultiScreenRuntime {
+                    secret_key,
+                    shutdown: shutdown_rx,
+                    broadcast_rx,
+                    approvals_tx,
+                    discovered_tx,
+                    cmd_rx,
+                    inbound_trusted: inbound_trusted_run,
+                }
+                .run(),
+            );
         })
         .expect("multi-screen worker thread");
 
@@ -472,4 +483,3 @@ async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) 
         }
     }
 }
-

@@ -242,11 +242,11 @@ impl Database {
 
     /// Current role. Defaults to [`Role::Primary`] on a fresh database.
     pub fn role(&self) -> Result<Role> {
-        match self.conn.query_row(
-            "SELECT role FROM role WHERE id = 1",
-            [],
-            |row| row.get::<_, Role>(0),
-        ) {
+        match self
+            .conn
+            .query_row("SELECT role FROM role WHERE id = 1", [], |row| {
+                row.get::<_, Role>(0)
+            }) {
             Ok(role) => Ok(role),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 self.conn.execute(
@@ -385,8 +385,10 @@ impl Database {
             |row| row.get::<_, i64>(0),
         )? != 0;
         if !has_audio_col {
-            self.conn
-                .execute("ALTER TABLE spotify_config ADD COLUMN audio_device_name TEXT", [])?;
+            self.conn.execute(
+                "ALTER TABLE spotify_config ADD COLUMN audio_device_name TEXT",
+                [],
+            )?;
         }
         Ok(())
     }

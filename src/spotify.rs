@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender, bounded};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use librespot::{
     connect::{ConnectConfig, Spirc},
     core::{Session, SessionConfig, SpotifyUri, authentication::Credentials, config::DeviceType},
@@ -16,6 +15,7 @@ use librespot::{
         player::{Player, PlayerEvent, QueueTrack},
     },
 };
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -457,9 +457,7 @@ impl<'a> HandleSetQueue<'a> {
             .filter(|t| !t.uri.is_empty())
             .map(|t| t.uri)
             .collect();
-        let current_uri: Option<String> = current_track
-            .map(|t| t.uri)
-            .filter(|u| !u.is_empty());
+        let current_uri: Option<String> = current_track.map(|t| t.uri).filter(|u| !u.is_empty());
 
         // Synchronously hydrate the first few visible queue entries so the panel
         // never opens with raw `spotify:track:...` strings; the background task
@@ -720,10 +718,7 @@ async fn kick_off_cover_fetch(
                     return;
                 }
                 Err(e) => {
-                    log::debug!(
-                        "spotify: cover fetch failed (attempt {}): {e}",
-                        attempt + 1,
-                    );
+                    log::debug!("spotify: cover fetch failed (attempt {}): {e}", attempt + 1,);
                 }
             }
             tokio::time::sleep(delay).await;
@@ -765,4 +760,3 @@ fn track_info(item: &AudioItem) -> SpotifyTrackInfo {
         cover_url,
     }
 }
-
