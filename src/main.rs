@@ -59,9 +59,15 @@ pub struct Model {
     /// it. Owned by the model so a hot reload is just a `write()` away from a
     /// re-render.
     layout: layout::LayoutState,
+    /// Image bytes for the `image` nodes of the active document. A primary
+    /// reads these off disk beside `layout.kdl`; a reflection receives them
+    /// from its primary and never reads its own.
+    assets: layout::assets::Assets,
     inhibitor: inhibitor::Inhibitor,
     /// Listener forwarding the active backend's events into the model.
     spotify_task: Option<TaskHandle>,
+    /// Reflection-only: listener applying layouts pushed by the primary.
+    layout_task: Option<TaskHandle>,
 }
 
 impl Model {
@@ -70,6 +76,8 @@ impl Model {
         let wifi_creds = db.wifi_credentials().ok().flatten();
         let role = db.role().expect("failed to load role");
         let hide_titlebar = db.hide_titlebar().unwrap_or(false);
+        // Reflections render whatever their primary last sent, across reboots.
+        let mirrored_layout = db.mirrored_layout().ok().flatten();
 
         let secret = db.node_secret().expect("failed to load iroh identity");
         let endpoint_id = secret.public();
@@ -90,6 +98,21 @@ impl Model {
             discovered_primaries: HashSet::new(),
         };
 
+        let layout = layout::LayoutState::startup(
+            matches!(role, persistence::Role::Primary),
+            mirrored_layout,
+        );
+        // A primary can read its images immediately; a reflection only knows
+        // which ones to expect until its primary sends them.
+        let assets = match role {
+            persistence::Role::Primary => {
+                layout::assets::Assets::from_disk(&layout.active.doc.root, &layout::config_dir())
+            }
+            persistence::Role::Reflection => {
+                layout::assets::Assets::expecting(&layout.active.doc.root)
+            }
+        };
+
         Self {
             db,
             wifi_creds,
@@ -105,9 +128,11 @@ impl Model {
             covers: HashMap::new(),
             is_playing: false,
             connected: true,
-            layout: layout::LayoutState::startup(),
+            layout,
+            assets,
             inhibitor: inhibitor::Inhibitor::new(),
             spotify_task: None,
+            layout_task: None,
         }
     }
 }
@@ -122,6 +147,9 @@ fn rebuild_backend(mut model: State<Model>) {
     // loop and releases the rodio sink; Reflection cancels the dial loop.
     // Cancelling the listener task means no late updates land in the model.
     if let Some(task) = m.spotify_task.take() {
+        task.cancel();
+    }
+    if let Some(task) = m.layout_task.take() {
         task.cancel();
     }
     m.backend = None;
@@ -156,10 +184,82 @@ fn rebuild_backend(mut model: State<Model>) {
             BackendHandle::Primary(h) => (h.state.clone(), h.events.clone()),
             BackendHandle::Reflection(h) => (h.state.clone(), h.events.clone()),
         };
+        if let BackendHandle::Reflection(h) = &backend {
+            let layouts = h.layouts.clone();
+            m.layout_task = Some(spawn_forever(layout_listener(model, layouts)));
+        }
         m.backend = Some(backend);
         // Not tied to the calling component: rebuilds are triggered from the
         // settings dialog, which unmounts when it closes.
         m.spotify_task = Some(spawn_forever(spotify_listener(model, state, events)));
+    }
+
+    // A fresh primary has reflections to tell about its layout, and a device
+    // that has just become one has a layout they have never seen.
+    publish_layout(&mut m);
+}
+
+/// Re-read the active document's images, and push document and images to every
+/// reflection — if we are the primary.
+///
+/// Called after anything that changes the active document — startup, a hot
+/// reload, an import, the reload button, a role switch — so there is one place
+/// that decides what reflections see. Reading the assets here rather than at
+/// each call site is the same argument: a document and its images change
+/// together, so there is no window where the screen shows one and the wire
+/// carries the other. A no-op on a reflection, which has nothing of its own to
+/// publish.
+fn publish_layout(m: &mut Model) {
+    if !matches!(m.role, persistence::Role::Primary) {
+        return;
+    }
+
+    let assets =
+        layout::assets::Assets::from_disk(&m.layout.active.doc.root, &layout::config_dir());
+    m.assets = assets;
+
+    let source = m.layout.active.text.clone();
+    let bundle: Vec<(String, Vec<u8>)> = m
+        .assets
+        .iter()
+        .map(|(path, asset)| (path.clone(), asset.bytes.to_vec()))
+        .collect();
+    m.multi_screen.broadcast_layout(source, bundle);
+}
+
+/// Apply a layout the primary pushed us, and remember it across reboots.
+///
+/// Assets arrive on the same channel, right behind the document that names
+/// them. They are deliberately not persisted — a cold boot renders the cached
+/// document with placeholders until the primary replays them on subscribe,
+/// which keeps the cache-invalidation story to "there isn't one".
+async fn layout_listener(
+    mut model: State<Model>,
+    layouts: async_channel::Receiver<multi_screen::LayoutUpdate>,
+) {
+    while let Ok(update) = layouts.recv().await {
+        let mut m = model.write();
+        match update {
+            multi_screen::LayoutUpdate::Document(source) => {
+                if m.layout.active.text == source {
+                    // Re-sent on every reconnect; nothing to do if it has not
+                    // changed. The assets behind it are re-sent too and land
+                    // in the store we already have.
+                    continue;
+                }
+                m.layout.apply(&source, layout::Source::Mirrored);
+                // A new document names a new set of images. Start expecting
+                // those rather than rendering the last party's photos.
+                let assets = layout::assets::Assets::expecting(&m.layout.active.doc.root);
+                m.assets = assets;
+                if let Err(e) = m.db.set_mirrored_layout(Some(&source)) {
+                    log::warn!("layout: cannot persist the mirrored layout: {e}");
+                }
+            }
+            multi_screen::LayoutUpdate::Asset { path, encoded } => {
+                m.assets.insert(path, bytes::Bytes::from(encoded));
+            }
+        }
     }
 }
 
@@ -311,7 +411,25 @@ fn forget_primary(mut model: State<Model>) {
 
 /// Re-read `layout.kdl` now rather than waiting for the poll interval.
 fn reload_layout(mut model: State<Model>) {
-    model.write().layout.reload();
+    let mut m = model.write();
+    m.layout.reload();
+    publish_layout(&mut m);
+}
+
+/// Apply a layout read from the file, and tell the reflections. Called by the
+/// watcher; goes through here rather than touching `layout` directly so the
+/// broadcast can't be forgotten.
+fn apply_layout_source(mut model: State<Model>, source: &str) {
+    let mut m = model.write();
+    m.layout.apply(source, layout::Source::File);
+    publish_layout(&mut m);
+}
+
+/// The layout file went away: fall back to the built-in one, and mirror that.
+fn use_built_in_layout(mut model: State<Model>) {
+    let mut m = model.write();
+    m.layout.use_built_in();
+    publish_layout(&mut m);
 }
 
 /// Write the built-in layout to the config path so a host has something that
@@ -319,10 +437,15 @@ fn reload_layout(mut model: State<Model>) {
 /// confirmation before calling this when a file is already there.
 fn copy_default_layout(mut model: State<Model>) {
     if let Err(e) = layout::write_layout(layout::default_source()) {
-        log::warn!("layout: cannot write {}: {e}", layout::layout_path().display());
+        log::warn!(
+            "layout: cannot write {}: {e}",
+            layout::layout_path().display()
+        );
         return;
     }
-    model.write().layout.reload();
+    let mut m = model.write();
+    m.layout.reload();
+    publish_layout(&mut m);
 }
 
 fn reject_pending_approval(mut model: State<Model>) {

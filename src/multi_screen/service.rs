@@ -83,6 +83,24 @@ async fn handle_subscribe(
         return; // tx drops, client sees channel close
     }
 
+    // Layout before state, so a reflection never flashes the built-in layout
+    // and then switches to the real one in front of guests.
+    let layout = match shared.last_layout.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("multi_screen: layout lock poisoned: {e}");
+            return;
+        }
+    };
+
+    let layout_assets: Vec<(String, Vec<u8>)> = match shared.layout_assets.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("multi_screen: layout-asset lock poisoned: {e}");
+            return;
+        }
+    };
+
     let snapshot = match shared.last_state.lock() {
         Ok(guard) => guard.clone(),
         Err(e) => {
@@ -101,6 +119,22 @@ async fn handle_subscribe(
 
     let endpoint_id = req.inner.endpoint_id;
     let tx = req.tx;
+
+    if let Some(source) = layout {
+        if let Err(e) = tx.send(WireMessage::Layout { source }).await {
+            log::debug!("multi_screen: subscriber dropped during layout: {e}");
+            return;
+        }
+        // Images belong to the document that named them, so they follow it
+        // immediately — before the snapshot, so the screen is complete at the
+        // first frame a guest sees rather than filling in afterwards.
+        for (path, encoded) in layout_assets {
+            if let Err(e) = tx.send(WireMessage::Asset { path, encoded }).await {
+                log::debug!("multi_screen: subscriber dropped during asset replay: {e}");
+                return;
+            }
+        }
+    }
 
     if let Err(e) = tx.send(WireMessage::Snapshot(snapshot)).await {
         log::debug!("multi_screen: subscriber dropped during snapshot: {e}");

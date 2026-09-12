@@ -291,6 +291,30 @@ impl Database {
         Ok(())
     }
 
+    /// Last layout received from the paired primary, kept so a reflection that
+    /// reboots before its primary comes up renders the party's colours rather
+    /// than flashing the built-in default.
+    pub fn mirrored_layout(&self) -> Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT mirrored_layout FROM app_prefs WHERE id = 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set_mirrored_layout(&self, source: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_prefs (id, mirrored_layout) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET mirrored_layout = excluded.mirrored_layout",
+            params![source],
+        )?;
+        Ok(())
+    }
+
     pub fn add_paired_peer(
         &self,
         endpoint_id: EndpointId,
@@ -389,6 +413,20 @@ impl Database {
                 "ALTER TABLE spotify_config ADD COLUMN audio_device_name TEXT",
                 [],
             )?;
+        }
+
+        // Same in-place upgrade for the mirrored layout.
+        let has_layout_col: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('app_prefs')
+                WHERE name = 'mirrored_layout'
+            )",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if !has_layout_col {
+            self.conn
+                .execute("ALTER TABLE app_prefs ADD COLUMN mirrored_layout TEXT", [])?;
         }
         Ok(())
     }

@@ -256,7 +256,7 @@ fn field(title: &'static str, control: impl Into<Element>) -> Rect {
 fn layout_section(model: State<Model>, role: Role) -> Rect {
     let mut confirm_copy = use_state(|| false);
 
-    let (status, problems, has_file) = {
+    let (status, problems, missing_assets, has_file) = {
         let m = model.read();
         let state = &m.layout;
         let status = if !state.load_error.is_empty() {
@@ -268,12 +268,27 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
             match state.active.source {
                 layout::Source::BuiltIn => "Using built-in default".to_string(),
                 layout::Source::File => "Loaded · layout.kdl".to_string(),
+                layout::Source::Mirrored => match &m.pairing.paired_primary {
+                    Some(p) => format!("Mirrored from primary {}", p.endpoint_id.fmt_short()),
+                    None => "Mirrored from the primary".to_string(),
+                },
             }
         };
         let problems: Vec<String> = state.problems().take(6).map(|d| d.to_string()).collect();
+        // Missing images are not parse problems — the document is fine, a file
+        // beside it is not — so they get their own list rather than being
+        // folded into the diagnostics above.
+        let missing_assets: Vec<(String, String)> = m
+            .assets
+            .missing()
+            .into_iter()
+            .take(6)
+            .map(|(path, why)| (path.to_string(), why.to_string()))
+            .collect();
         (
             status,
             problems,
+            missing_assets,
             state.active.source == layout::Source::File,
         )
     };
@@ -282,13 +297,18 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
         .width(Size::fill())
         .spacing(8.)
         .child("Layout")
-        .child(label().font_size(13.).text(status))
-        .child(
+        .child(label().font_size(13.).text(status));
+
+    // The path is only meaningful on a primary — a reflection's layout has no
+    // file behind it, and pointing at one it deliberately ignores would mislead.
+    if role == Role::Primary {
+        section = section.child(
             label()
                 .font_size(12.)
                 .color(MUTED)
                 .text(layout::layout_path().display().to_string()),
         );
+    }
 
     if !problems.is_empty() {
         section = section.child(rect().width(Size::fill()).spacing(2.).children(
@@ -301,6 +321,25 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
                     .into()
             }),
         ));
+    }
+
+    if !missing_assets.is_empty() {
+        section = section
+            .child(
+                label()
+                    .font_size(13.)
+                    .text(format!("{} — showing placeholders", missing(missing_assets.len()))),
+            )
+            .child(rect().width(Size::fill()).spacing(2.).children(
+                missing_assets.into_iter().map(|(path, why)| {
+                    label()
+                        .width(Size::fill())
+                        .font_size(12.)
+                        .color(MUTED)
+                        .text(format!("{path} — {why}"))
+                        .into()
+                }),
+            ));
     }
 
     if role == Role::Reflection {
@@ -340,6 +379,14 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
                     }),
             ),
     )
+}
+
+fn missing(n: usize) -> String {
+    if n == 1 {
+        "1 missing image".to_string()
+    } else {
+        format!("{n} missing images")
+    }
 }
 
 fn problem_count(n: usize) -> String {

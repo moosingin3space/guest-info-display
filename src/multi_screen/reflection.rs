@@ -12,7 +12,7 @@ use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::oneshot;
 
 use super::{
-    ALPN,
+    ALPN, LayoutUpdate,
     proto::{DisplayProtocol, PairingRequest, PairingResponse, SubscribeRequest, WireMessage},
 };
 use crate::spotify::{CoverImage, Event, SharedSpotifyState, SpotifyState};
@@ -25,13 +25,14 @@ pub async fn run(
     primary: EndpointId,
     state: SharedSpotifyState,
     events_tx: AsyncSender<Event>,
+    layouts_tx: AsyncSender<LayoutUpdate>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(30);
 
     loop {
-        let session = run_session(&endpoint, primary, &state, &events_tx);
+        let session = run_session(&endpoint, primary, &state, &events_tx, &layouts_tx);
         tokio::select! {
             biased;
             _ = &mut shutdown => return,
@@ -99,6 +100,7 @@ async fn run_session(
     primary: EndpointId,
     state: &SharedSpotifyState,
     events_tx: &AsyncSender<Event>,
+    layouts_tx: &AsyncSender<LayoutUpdate>,
 ) -> Result<SessionEnd, Box<dyn std::error::Error + Send + Sync>> {
     let client =
         irpc_iroh::client::<DisplayProtocol>(endpoint.clone(), EndpointAddr::new(primary), ALPN);
@@ -138,6 +140,24 @@ async fn run_session(
             }
             WireMessage::CoversCleared => {
                 if events_tx.send(Event::CoversCleared).await.is_err() {
+                    return Ok(SessionEnd::ConsumerGone);
+                }
+            }
+            WireMessage::Layout { source } => {
+                if layouts_tx
+                    .send(LayoutUpdate::Document(source))
+                    .await
+                    .is_err()
+                {
+                    return Ok(SessionEnd::ConsumerGone);
+                }
+            }
+            WireMessage::Asset { path, encoded } => {
+                if layouts_tx
+                    .send(LayoutUpdate::Asset { path, encoded })
+                    .await
+                    .is_err()
+                {
                     return Ok(SessionEnd::ConsumerGone);
                 }
             }
