@@ -213,7 +213,7 @@ reconnected: the discovery loop's outer `while let Some(credentials)` in
 
 ### T4: Identity and role persistence ✅
 
-**Phase:** 3  **Depends on:** none  **Status:** landed — `iroh = "0.98"` added; `Role` enum and `node_identity` / `role` tables in `src/persistence.rs`; `node_secret()`, `role()`, `set_role()` all in place. EndpointId is logged at debug on startup so the "two restarts → same NodeId" check is observable.
+**Phase:** 3  **Depends on:** none  **Status:** landed — `iroh = "1"` and `iroh-mdns-address-lookup` are configured; the `Role` enum and `node_identity` / `role` tables in `src/persistence.rs`; `node_secret()`, `role()`, `set_role()` all in place. EndpointId is logged at debug on startup so the "two restarts → same NodeId" check is observable.
 
 **Goal:** Persist the iroh `SecretKey` and the current role across restarts.
 No networking yet.

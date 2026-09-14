@@ -8,10 +8,8 @@
 //! reflection sees it without any role-specific endpoint configuration. The
 //! discovery filter (T10) keys on iroh's `UserData` field set below.
 
-use iroh::{
-    Endpoint, SecretKey, address_lookup::MdnsAddressLookup, endpoint::presets,
-    endpoint_info::UserData,
-};
+use iroh::{Endpoint, SecretKey, endpoint::presets, endpoint_info::UserData};
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 
 use super::ALPN;
 

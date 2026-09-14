@@ -8,10 +8,8 @@
 
 use async_channel::Sender as AsyncSender;
 use futures_util::StreamExt;
-use iroh::{
-    EndpointId,
-    address_lookup::{DiscoveryEvent, MdnsAddressLookup},
-};
+use iroh::EndpointId;
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 
 use super::endpoint::USER_DATA_TAG;
 
