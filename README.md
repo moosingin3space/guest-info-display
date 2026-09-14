@@ -26,6 +26,10 @@ To build and install the Flatpak locally:
    ./scripts/make-flatpak.sh
    ```
 
+The build script generates the temporary Cargo source manifest from
+`Cargo.lock` before invoking Flatpak Builder. It uses `uv` when available,
+or the `flatpak-cargo-generator` command from `org.flatpak.Builder`.
+
 ### Building from Source
 
 If you prefer to build locally, you will need the Rust toolchain and several system development libraries (`xcb`, `xkbcommon`, `xkbcommon-x11`).

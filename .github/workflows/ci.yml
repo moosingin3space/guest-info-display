@@ -43,8 +43,8 @@ jobs:
             cargo build --release
             cargo test --release
 
-  check-generated-sources:
-    name: Check generated-sources.json in sync
+  generate-flatpak-sources:
+    name: Generate Flatpak Cargo sources
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,26 +53,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify generated-sources.json matches Cargo.lock
+      - name: Generate generated-sources.json from Cargo.lock
         uses: wolfi-dev/wolfi-act@7f6915e256697663d18940570e932e990e6adb93 # main
         with:
           packages: python-3.13,py3-aiohttp,py3-tomlkit,curl,git
           command: |
             curl -fsSL \
-              "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py" \
+              "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/de2225a6dee4818c1339b3cdbf29f90c471fcb7e/cargo/flatpak-cargo-generator.py" \
               -o /tmp/flatpak-cargo-generator.py
-            python3 /tmp/flatpak-cargo-generator.py /work/Cargo.lock -o /tmp/generated-sources-new.json
-            if ! diff -q /work/generated-sources.json /tmp/generated-sources-new.json > /dev/null 2>&1; then
-              echo "generated-sources.json is out of sync with Cargo.lock."
-              echo "Regenerate with: python3 flatpak-cargo-generator.py Cargo.lock -o generated-sources.json"
-              diff /work/generated-sources.json /tmp/generated-sources-new.json | head -40 || true
-              exit 1
-            fi
-            echo "generated-sources.json is up to date."
+            python3 /tmp/flatpak-cargo-generator.py /work/Cargo.lock -o /work/generated-sources.json
+
+      - name: Upload generated Cargo sources
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-cargo-sources
+          path: generated-sources.json
+          if-no-files-found: error
+          retention-days: 7
 
   flatpak:
     name: Build Flatpak
-    needs: check-generated-sources
+    needs: generate-flatpak-sources
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,6 +84,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Download generated Cargo sources
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flatpak-cargo-sources
+          path: .
 
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6

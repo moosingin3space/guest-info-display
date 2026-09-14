@@ -3,6 +3,7 @@ tools/
 builddir/
 .flatpak-builder/
 repo/
+generated-sources.json
 specs
 # CocoIndex Code (ccc)
 /.cocoindex_code/
