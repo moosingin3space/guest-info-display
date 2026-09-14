@@ -1,18 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/flatpak/flatpak-builder/main/data/flatpak-manifest.schema.json",
-  "id": "xyz.mooshq.GuestInfoDisplay",
+  "id": "xyz.mooshq.FreyaSpike",
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "25.08",
   "sdk": "org.freedesktop.Sdk",
-  "command": "guest-info-display",
+  "command": "freya-hello",
   "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
   "finish-args": [
     "--share=ipc",
-    "--share=network",
     "--device=dri",
     "--socket=fallback-x11",
-    "--socket=wayland",
-    "--socket=pulseaudio"
+    "--socket=wayland"
   ],
   "modules": [
     {
@@ -29,16 +27,13 @@
       "build-commands": [
         "cargo --offline fetch --manifest-path Cargo.toml --verbose",
         "cargo build --offline --release",
-        "install -Dm0755 target/release/guest-info-display -t ${FLATPAK_DEST}/bin/",
-        "install -Dm0644 data/${FLATPAK_ID}.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/",
-        "install -Dm0644 data/${FLATPAK_ID}.desktop -t ${FLATPAK_DEST}/share/applications/",
-        "install -Dm0644 data/${FLATPAK_ID}.svg -t ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/"
+        "install -Dm0755 target/release/freya-hello -t ${FLATPAK_DEST}/bin/"
       ],
       "sources": [
         {
           "type": "dir",
           "path": "./",
-          "skip": ["target", ".flatpak-builder", "builddir", "repo", "spike"]
+          "skip": ["target", ".flatpak-builder", "build-dir", "repo"]
         },
         "generated-sources.json",
         {
