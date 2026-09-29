@@ -16,13 +16,30 @@ just flatpak-test         # build the bundle, install it for your user, and laun
 just flatpak-run          # launch the installed Flatpak
 ```
 
-The Flatpak manifest is `xyz.mooshq.GuestInfoDisplay.json` targeting `org.freedesktop.Platform 25.08`.
+The Flatpak manifests target `org.freedesktop.Platform 25.08`. `xyz.mooshq.GuestInfoDisplay.json`
+(release) and `xyz.mooshq.GuestInfoDisplay.Devel.json` (builds of `main`) differ only in `id`; both
+pull in the shared app module `build-aux/guest-info-display.json`, which holds the build commands
+and sources. `build-aux/install-data.sh` installs the desktop file, metainfo and icon renamed to
+`${FLATPAK_ID}`, and the window reads its app ID from `FLATPAK_ID`, so the two install side by side.
+
+### Publishing
+
+CI publishes a signed Flatpak repository to GitHub Pages (the `publish` job in `ci.yml`,
+running `build-aux/publish-flatpak-repo.sh`). Pushes to `main` update
+`xyz.mooshq.GuestInfoDisplay.Devel//master`; a `vX.Y.Z` tag updates
+`xyz.mooshq.GuestInfoDisplay//stable` and fails unless it matches the `Cargo.toml` version and the
+metainfo has a `<release version="X.Y.Z">`. Pages keeps no state between deploys, so each publish
+mirrors the live repository down, commits the new bundle on top, and redeploys the whole thing.
+Publishes are serialized by the `flatpak-repo` concurrency group (builds for `main` and tags still
+run in parallel). Tag runs also attach the bundle to a GitHub Release, and every publish re-feeds
+the highest release's bundle; an unchanged bundle is skipped, so this only matters when a tag
+publish was cancelled while waiting for the lock, and the next publish restores it.
 
 Skia comes from a prebuilt archive, never a source build: `freya-skia-bindings` is
 pinned with `no-compile`, so a missing or mismatched prebuilt fails the build in
 seconds. Online builds download it from `marc2332/rust-skia` releases; the Flatpak
-build fetches it as a manifest source and points `SKIA_BINARIES_URL` at it. Bumping
-Freya means bumping `freya-skia-bindings` and the manifest's URLs and checksums
+build fetches it as a source of the app module and points `SKIA_BINARIES_URL` at it. Bumping
+Freya means bumping `freya-skia-bindings` and the app module's URLs and checksums
 together — see `plans/freya-skia-port.md`.
 
 Plain host `cargo build` works only where the linker finds `libstdc++`, EGL/GL,

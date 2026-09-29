@@ -123,6 +123,25 @@ flatpak-test: flatpak-install flatpak-run
 flatpak-uninstall:
     flatpak uninstall --user --noninteractive {{app_id}}
 
+# ---------------------------------------------------------------------------
+# Publishing — the Flatpak repository on GitHub Pages.
+# ---------------------------------------------------------------------------
+
+# One-time: generate the repository's signing key and print how to store it
+repo-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir={{root}}/target/repo-key
+    if [[ -e $dir ]]; then echo "$dir already exists; not overwriting it." >&2; exit 1; fi
+    mkdir -m 700 -p "$dir/gnupg"
+    gpg --homedir "$dir/gnupg" --batch --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key 'Guest Info Display Flatpak repository' rsa4096 sign never
+    gpg --homedir "$dir/gnupg" --armor --export-secret-keys >"$dir/private.asc"
+    echo
+    echo "Store the key as a repository secret, then keep $dir/private.asc somewhere safe:"
+    echo "  gh secret set FLATPAK_GPG_PRIVATE_KEY < $dir/private.asc"
+    echo "Clients pin this key: replacing it breaks updates for everyone installed."
+
 # Delete Flatpak build output and the bundle
 clean:
     rm -rf builddir repo .flatpak-builder {{bundle}}

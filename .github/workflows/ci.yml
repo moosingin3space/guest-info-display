@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+    # A v-prefixed tag publishes the release build; see the publish job.
+    tags: ['v*']
   pull_request:
     branches: [main]
 
@@ -27,8 +29,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Tag runs start clean, so nothing cached by an earlier run reaches a release.
       - name: Cache Cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref_type != 'tag'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         with:
           path: .cargo-home
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
@@ -92,14 +96,41 @@ jobs:
           name: flatpak-cargo-sources
           path: .
 
+      # Tags build the release app on the stable branch; everything else
+      # builds xyz.mooshq.GuestInfoDisplay.Devel, which installs beside it.
+      - name: Choose release or Devel build
+        id: variant
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" != tag ]; then
+            echo "manifest=xyz.mooshq.GuestInfoDisplay.Devel.json" >> "$GITHUB_OUTPUT"
+            echo "branch=master" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=${REF_NAME#v}
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag $REF_NAME does not match Cargo.toml version $cargo_version"
+            exit 1
+          fi
+          if ! grep -q "<release version=\"$version\"" data/xyz.mooshq.GuestInfoDisplay.metainfo.xml; then
+            echo "::error::The metainfo has no <release version=\"$version\"> entry"
+            exit 1
+          fi
+          echo "manifest=xyz.mooshq.GuestInfoDisplay.json" >> "$GITHUB_OUTPUT"
+          echo "branch=stable" >> "$GITHUB_OUTPUT"
+
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6
         with:
           bundle: guest-info-display.flatpak
-          manifest-path: xyz.mooshq.GuestInfoDisplay.json
-          cache: true
-          restore-cache: true
-          cache-key: flatpak-builder-${{ hashFiles('Cargo.lock') }}
+          manifest-path: ${{ steps.variant.outputs.manifest }}
+          branch: ${{ steps.variant.outputs.branch }}
+          cache: ${{ github.ref_type != 'tag' }}
+          restore-cache: ${{ github.ref_type != 'tag' }}
+          cache-key: flatpak-builder-${{ steps.variant.outputs.branch }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -108,3 +139,125 @@ jobs:
           path: guest-info-display.flatpak
           if-no-files-found: error
           retention-days: 30
+
+  # Releases keep every stable bundle, so the publish job can restore the
+  # stable branch if the repository ever loses it.
+  release:
+    name: Attach bundle to GitHub Release
+    needs: [build, flatpak]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Flatpak bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: guest-info-display-flatpak
+          path: .
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          asset="xyz.mooshq.GuestInfoDisplay-${TAG#v}-x86_64.flatpak"
+          mv guest-info-display.flatpak "$asset"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$asset" --clobber
+          else
+            gh release create "$TAG" "$asset" --verify-tag --title "$TAG" --generate-notes
+          fi
+
+  publish:
+    name: Publish Flatpak repository
+    needs: [build, flatpak, release]
+    # release is skipped on main, which would otherwise skip this job too.
+    if: >-
+      !cancelled() && github.event_name == 'push'
+      && needs.build.result == 'success' && needs.flatpak.result == 'success'
+      && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    # Each publish mirrors the live repository and replaces it wholesale, so
+    # two running at once would each drop the other's build. Only one run can
+    # wait here, so a newer one can cancel a waiting tag publish; re-feeding
+    # the latest release below repairs that on the next publish.
+    concurrency:
+      group: flatpak-repo
+      cancel-in-progress: false
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download Devel bundle
+        if: github.ref_type != 'tag'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: guest-info-display-flatpak
+          path: bundles
+
+      # The highest release, not this run's tag, so a backport tag can't
+      # roll the stable branch back.
+      - name: Download latest release bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          mkdir -p bundles
+          if [ -e bundles/guest-info-display.flatpak ]; then
+            mv bundles/guest-info-display.flatpak "bundles/xyz.mooshq.GuestInfoDisplay.Devel-${SHA:0:12}-x86_64.flatpak"
+          fi
+          latest=$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName --jq '.[].tagName' | grep '^v' | sort -V | tail -n1 || true)
+          if [ -z "$latest" ]; then
+            echo "No releases yet"
+          else
+            echo "Latest release: $latest"
+            gh release download "$latest" --pattern '*.flatpak' --dir bundles
+          fi
+          ls -l bundles
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Import signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "::error::Set the FLATPAK_GPG_PRIVATE_KEY secret; see README.md"
+            exit 1
+          fi
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          key_id=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ { print $10; exit }')
+          echo "GPG_HOMEDIR=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "GPG_KEY_ID=$key_id" >> "$GITHUB_ENV"
+
+      - name: Assemble repository
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: build-aux/publish-flatpak-repo.sh _site bundles/*.flatpak
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

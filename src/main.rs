@@ -802,11 +802,16 @@ fn main() {
         .and_then(|db| db.hide_titlebar().ok())
         .unwrap_or(false);
 
+    // The sandbox exports FLATPAK_ID, which differs for the .Devel build; the
+    // window's app ID has to match it for the desktop file to pick it up.
+    let app_id =
+        std::env::var("FLATPAK_ID").unwrap_or_else(|_| "xyz.mooshq.GuestInfoDisplay".into());
+
     launch(
         LaunchConfig::new().with_window(
             WindowConfig::new(app)
                 .with_title("Guest Info Display")
-                .with_app_id("xyz.mooshq.GuestInfoDisplay")
+                .with_app_id(app_id)
                 .with_size(1280., 800.)
                 .with_background((10, 16, 51))
                 .with_decorations(!hide_titlebar),

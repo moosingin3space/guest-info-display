@@ -5,6 +5,8 @@ builddir/
 repo/
 generated-sources.json
 /guest-info-display.flatpak
+# Flatpak repository site, assembled by build-aux/publish-flatpak-repo.sh.
+/_site
 # Created by the CI build command (`just ci-build` runs it verbatim).
 /.cargo-home
 specs
