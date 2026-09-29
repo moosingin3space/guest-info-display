@@ -18,6 +18,16 @@ A sleek, modern Linux desktop dashboard designed for guest rooms, home offices, 
 
 The preferred way to install Guest Info Display is via Flatpak. This bundles all necessary system libraries and provides a secure sandbox.
 
+Builds are published to a Flatpak repository at
+<https://moosingin3space.github.io/guest-info-display/>:
+
+```bash
+# Latest release
+flatpak install --user https://moosingin3space.github.io/guest-info-display/xyz.mooshq.GuestInfoDisplay.flatpakref
+# Latest build of main, installable alongside the release
+flatpak install --user https://moosingin3space.github.io/guest-info-display/xyz.mooshq.GuestInfoDisplay.Devel.flatpakref
+```
+
 To build and install the Flatpak locally:
 
 1. Ensure you have `flatpak` and `flatpak-builder` installed.
@@ -56,6 +66,22 @@ Settings are persisted in a local SQLite database at `~/.local/share/xyz.mooshq.
 - **[librespot](https://github.com/librespot-org/librespot)**: Spotify Connect integration.
 - **[SQLite](https://sqlite.org/)**: Local data persistence.
 - **[Flatpak](https://flatpak.org/)**: Distribution and sandboxing.
+
+## Releasing
+
+Every push to `main` publishes `xyz.mooshq.GuestInfoDisplay.Devel`. To publish a release:
+
+1. Set `version` in `Cargo.toml` and add a matching `<release>` to
+   `data/xyz.mooshq.GuestInfoDisplay.metainfo.xml`.
+2. Tag the commit `vX.Y.Z` and push the tag. CI refuses a tag that doesn't match both,
+   attaches the bundle to a GitHub Release, and publishes it to the stable branch.
+
+One-time repository setup:
+
+1. `just repo-key`, then store the key with the `gh secret set` command it prints.
+2. In **Settings → Pages**, set the source to **GitHub Actions**.
+3. In **Settings → Environments → github-pages**, allow deployments from tags matching `v*`
+   as well as `main`.
 
 ## License
 

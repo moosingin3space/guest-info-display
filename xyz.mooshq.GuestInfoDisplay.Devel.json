@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/flatpak/flatpak-builder/main/data/flatpak-manifest.schema.json",
-  "id": "xyz.mooshq.GuestInfoDisplay",
+  "id": "xyz.mooshq.GuestInfoDisplay.Devel",
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "25.08",
   "sdk": "org.freedesktop.Sdk",
