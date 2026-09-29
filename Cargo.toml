@@ -32,7 +32,7 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
-vergen = "=9.0"
+vergen = "=10.0.3"
 
 [dev-dependencies]
 postcard = { version = "1", features = ["alloc"] }
