@@ -9,8 +9,8 @@ A `Justfile` wraps the common tasks (`just` lists them):
 ```bash
 just build / test / run   # dev loop, run inside the 25.08 Flatpak SDK
 just cargo <args>         # any cargo command inside the SDK
-just sources              # regenerate generated-sources.json after Cargo.lock changes
-just ci                   # every CI job locally: check-sources, ci-build, flatpak-bundle
+just sources              # generate the untracked generated-sources.json from Cargo.lock
+just ci                   # every CI job locally: ci-build, flatpak-bundle
 just ci-build             # CI's Wolfi build+test, reading packages/command from ci.yml, in podman
 just flatpak-test         # build the bundle, install it for your user, and launch it
 just flatpak-run          # launch the installed Flatpak

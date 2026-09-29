@@ -45,7 +45,7 @@ run: build
         --env=RUST_LOG="${RUST_LOG:-guest_info_display=info}" \
         --command={{root}}/target/sdk/debug/guest-info-display {{sdk}}
 
-# Regenerate generated-sources.json from Cargo.lock
+# Generate generated-sources.json from Cargo.lock (untracked; CI generates its own)
 sources: _generator
     uv run --quiet --with aiohttp --with tomlkit \
         python target/tools/flatpak-cargo-generator.py Cargo.lock -o generated-sources.json
@@ -55,17 +55,7 @@ sources: _generator
 # ---------------------------------------------------------------------------
 
 # Run every CI job locally
-ci: check-sources ci-build flatpak-bundle
-
-# CI "check-generated-sources": generated-sources.json must match Cargo.lock
-check-sources: _generator
-    uv run --quiet --with aiohttp --with tomlkit \
-        python target/tools/flatpak-cargo-generator.py Cargo.lock -o target/generated-sources.json
-    @if ! diff -q generated-sources.json target/generated-sources.json >/dev/null; then \
-        echo "generated-sources.json is out of sync with Cargo.lock; run 'just sources'."; \
-        exit 1; \
-    fi
-    @echo "generated-sources.json is up to date."
+ci: ci-build flatpak-bundle
 
 # CI "Build and test": the workflow's own Wolfi packages and command, in rootless podman
 ci-build:
@@ -99,7 +89,7 @@ ci-build:
     sys.exit(result.returncode)
 
 # CI "Build Flatpak": offline flatpak-builder build, exported as a bundle
-flatpak-bundle arch=`uname -m`:
+flatpak-bundle arch=`uname -m`: sources
     flatpak run org.flatpak.Builder --user --force-clean --arch={{arch}} \
         --install-deps-from=flathub --repo=repo builddir {{manifest}}
     flatpak build-bundle --arch={{arch}} repo {{bundle}} {{app_id}}
