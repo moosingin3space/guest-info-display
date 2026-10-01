@@ -21,7 +21,7 @@ freya-skia-bindings = { version = "=0.98.1", default-features = false, features 
 futures-util = "0.3"
 http = "1"
 iroh = "1"
-iroh-mdns-address-lookup = "0.4"
+iroh-mdns-address-lookup = "0.6"
 irpc = { version = "0.17", features = ["derive", "rpc"] }
 irpc-iroh = "0.17"
 librespot = { git = "https://github.com/librespot-org/librespot", features = ["rodio-backend"] }
