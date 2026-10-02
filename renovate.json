@@ -1,4 +1,32 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigestsToSemver"]
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigestsToSemver"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update FreeDesktop SDK versions from the Flatpak CI image tags",
+      "managerFilePatterns": [
+        "/^xyz\\.mooshq\\.GuestInfoDisplay(?:\\.Devel)?\\.json$/",
+        "/^spike\\/freya-hello\\/xyz\\.mooshq\\.FreyaSpike\\.json$/",
+        "/^Justfile$/",
+        "/^CLAUDE\\.md$/"
+      ],
+      "matchStrings": [
+        "\"runtime-version\"\\s*:\\s*\"(?<currentValue>\\d{2}\\.\\d{2})\"",
+        "org\\.freedesktop\\.Sdk//(?<currentValue>\\d{2}\\.\\d{2})",
+        "inside the (?<currentValue>\\d{2}\\.\\d{2})(?: Flatpak)? SDK",
+        "org\\.freedesktop\\.Platform (?<currentValue>\\d{2}\\.\\d{2})"
+      ],
+      "packageNameTemplate": "ghcr.io/flathub-infra/flatpak-github-actions",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+      "extractVersionTemplate": "^freedesktop-(?<version>\\d{2}\\.\\d{2})$"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["ghcr.io/flathub-infra/flatpak-github-actions"],
+      "groupName": "FreeDesktop SDK"
+    }
+  ]
 }
