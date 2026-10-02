@@ -5,7 +5,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 app_id := "xyz.mooshq.GuestInfoDisplay"
 manifest := app_id + ".json"
 bundle := "guest-info-display.flatpak"
-sdk := "org.freedesktop.Sdk//25.08"
+sdk := "org.freedesktop.Sdk//26.08"
 root := justfile_directory()
 generator_url := "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py"
 
@@ -16,7 +16,7 @@ default:
     @just --list
 
 # ---------------------------------------------------------------------------
-# Development — inside the 25.08 SDK, so the host needs no Skia link deps.
+# Development — inside the 26.08 SDK, so the host needs no Skia link deps.
 # ---------------------------------------------------------------------------
 
 # Run cargo inside the Flatpak SDK, e.g. `just cargo clippy`

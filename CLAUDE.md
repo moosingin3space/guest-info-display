@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A `Justfile` wraps the common tasks (`just` lists them):
 
 ```bash
-just build / test / run   # dev loop, run inside the 25.08 Flatpak SDK
+just build / test / run   # dev loop, run inside the 26.08 Flatpak SDK
 just cargo <args>         # any cargo command inside the SDK
 just sources              # generate the untracked generated-sources.json from Cargo.lock
 just ci                   # every CI job locally: ci-build, flatpak-bundle
@@ -16,7 +16,7 @@ just flatpak-test         # build the bundle, install it for your user, and laun
 just flatpak-run          # launch the installed Flatpak
 ```
 
-The Flatpak manifests target `org.freedesktop.Platform 25.08`. `xyz.mooshq.GuestInfoDisplay.json`
+The Flatpak manifests target `org.freedesktop.Platform 26.08`. `xyz.mooshq.GuestInfoDisplay.json`
 (release) and `xyz.mooshq.GuestInfoDisplay.Devel.json` (builds of `main`) differ only in `id`; both
 pull in the shared app module `build-aux/guest-info-display.json`, which holds the build commands
 and sources. `build-aux/install-data.sh` installs the desktop file, metainfo and icon renamed to
