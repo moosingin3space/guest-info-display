@@ -17,7 +17,7 @@ freya = { version = "=0.4.3", features = ["engine"] }
 # Not used directly. Present only to turn on `no-compile`, so a prebuilt key
 # mismatch panics instead of silently building Skia from source.
 # default-features = false so this entry adds no features to the key.
-freya-skia-bindings = { version = "=0.98.1", default-features = false, features = ["no-compile"] }
+freya-skia-bindings = { version = "=0.104.0", default-features = false, features = ["no-compile"] }
 futures-util = "0.3"
 http = "1"
 iroh = "1"
