@@ -179,6 +179,14 @@ pub enum Widget {
         heading: String,
         count: usize,
     },
+    /// A compact track line: small cover, title and artist, and optionally the
+    /// next track — for a strip beside a video or under the Wi-Fi code.
+    NowPlayingStrip {
+        direction: Direction,
+        cover_size: f32,
+        show_next: bool,
+        next_label: String,
+    },
     CoverArt {
         size: f32,
     },
