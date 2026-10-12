@@ -26,11 +26,17 @@ pub struct VideoView {
     pub inhibitor: Inhibitor,
     /// Placeholder text color, for when there is nothing to show.
     pub muted_text: (u8, u8, u8, u8),
+    /// This device mirrors a primary. Its video is then always silent: sound
+    /// comes from the primary alone, as Spotify's does.
+    pub reflection: bool,
 }
 
 impl PartialEq for VideoView {
     fn eq(&self, other: &Self) -> bool {
-        self.node == other.node && self.files == other.files && self.muted_text == other.muted_text
+        self.node == other.node
+            && self.files == other.files
+            && self.muted_text == other.muted_text
+            && self.reflection == other.reflection
     }
 }
 
@@ -43,7 +49,9 @@ impl Component for VideoView {
                 node: self.node.id,
                 paths: self.node.items.clone(),
                 items: self.files.clone(),
-                muted: self.node.muted,
+                // Sound plays from the primary only, like the music; a
+                // reflection does not even decode it.
+                muted: self.node.muted || self.reflection,
                 looping: self.node.looping,
                 shuffle: self.node.shuffle,
                 wait: self.node.wait_for_reflections,
@@ -128,8 +136,11 @@ impl Component for VideoView {
         }
     }
 
+    // The role is part of the key: a device that switches between primary
+    // and reflection needs a player that leads or follows, and that plays
+    // sound or does not, accordingly.
     fn render_key(&self) -> DiffKey {
-        DiffKey::from(&self.node)
+        DiffKey::from(&(&self.node, self.reflection))
     }
 }
 

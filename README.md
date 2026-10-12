@@ -208,8 +208,9 @@ that will not decode is skipped the same way.
 **Sound.** Videos are muted by default — the music is the party's soundtrack.
 `muted=#false` plays the clip's audio as its own stream, labelled *Guest Info
 Display* in your system mixer (`pavucontrol`, GNOME Settings, `wpctl`), so you
-balance it against Spotify there rather than in the app. Muted clips skip
-decoding their audio entirely.
+balance it against Spotify there rather than in the app. Like the music, a
+video's sound plays from the primary only: reflections always show it silent.
+Muted clips skip decoding their audio entirely.
 
 **Hardware decoding.** On a machine with working VA-API — AMD and Intel GPUs,
 including integrated ones — frames are decoded and converted on the GPU and
