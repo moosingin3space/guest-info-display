@@ -155,6 +155,7 @@ mod tests {
                 videos: vec![VideoRef {
                     path: "ghosts.mp4".into(),
                     hash: iroh_blobs::Hash::new(b"not really a video"),
+                    size: 18,
                 }],
             },
             WireMessage::Asset {

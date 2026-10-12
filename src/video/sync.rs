@@ -129,6 +129,21 @@ pub fn latest(node: u32) -> Option<(u64, Cue)> {
     registry().lock().unwrap().cues.get(&node).cloned()
 }
 
+/// Clips the primary needs this reflection to have soonest, by layout path:
+/// what each node is playing (rank 0), then what each plays next (rank 1).
+pub fn wanted_soon() -> Vec<(u8, String)> {
+    let registry = registry().lock().unwrap();
+    let mut out: Vec<(u8, String)> = Vec::new();
+    for (_, cue) in registry.cues.values() {
+        out.push((0, cue.current.clone()));
+        if let Some(next) = &cue.next {
+            out.push((1, next.clone()));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// A new document: its nodes are not the old document's nodes.
 pub fn clear() {
     registry().lock().unwrap().cues.clear();

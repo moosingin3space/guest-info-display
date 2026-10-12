@@ -589,21 +589,54 @@ fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rec
         .collect();
 
     if files.iter().all(Option::is_none) {
-        return apply_box(
+        let placeholder = apply_box(
             base.background(rgba(ctx.theme.placeholder)),
             style,
             parent,
             BoxDefaults {
                 main_align: Some(Align::Center),
                 cross_align: Some(Align::Center),
+                spacing: Some(12.),
                 ..BoxDefaults::default()
             },
-        )
-        .child(
-            label()
-                .color(rgba(ctx.theme.muted_text))
-                .text(v.items[0].clone()),
         );
+        // On a primary a missing clip is the host's to fix, so name it, as an
+        // image does. On a reflection it is simply still on its way.
+        if !matches!(ctx.model.role, Role::Reflection) {
+            return placeholder.child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .text(v.items[0].clone()),
+            );
+        }
+        let receiving = v.items.iter().find_map(|p| ctx.model.assets.progress(p));
+        return match receiving {
+            Some(done) => placeholder
+                .child(
+                    label()
+                        .color(rgba(ctx.theme.muted_text))
+                        .text(format!("Receiving video… {:.0}%", done * 100.0)),
+                )
+                .child(
+                    rect()
+                        .width(Size::px(240.))
+                        .height(Size::px(6.))
+                        .corner_radius(3.)
+                        .background(rgba(ctx.theme.surface_border))
+                        .child(
+                            rect()
+                                .width(Size::percent(done * 100.))
+                                .height(Size::fill())
+                                .corner_radius(3.)
+                                .background(rgba(ctx.theme.muted_text)),
+                        ),
+                ),
+            None => placeholder.child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .text("Waiting for video from the primary…"),
+            ),
+        };
     }
 
     // Black behind the frame, so `contain` letterboxes like a screen would.

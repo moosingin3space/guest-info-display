@@ -124,6 +124,12 @@ pub enum LayoutUpdate {
     Asset { path: String, encoded: Vec<u8> },
     /// A `video` path of the current document, now on disk and playable.
     Video { path: String, file: PathBuf },
+    /// How far along the download behind a `video` path is.
+    VideoProgress {
+        path: String,
+        received: u64,
+        total: u64,
+    },
 }
 
 /// Hands the GPUI side a primary-mirroring backend that produces the same
