@@ -160,6 +160,8 @@ type TrustState = Arc<Mutex<HashSet<EndpointId>>>;
 /// One live subscription. Tracked together so the primary can target a single
 /// reflection (e.g. on removal) without having to disambiguate by sender alone.
 pub(crate) struct Subscriber {
+    /// This subscription, as opposed to the reflection's next one.
+    pub id: u64,
     pub endpoint_id: EndpointId,
     pub sender: IrpcSender<WireMessage>,
 }
@@ -278,18 +280,23 @@ impl MultiScreenHandle {
     pub fn seed_inbound_trusted(&self, ids: HashSet<EndpointId>) {
         if let Ok(mut guard) = self.inbound_trusted.lock() {
             *guard = ids;
+            // Known from the database at once, long before the endpoint is up:
+            // a primary holding its first clip needs it from its first frame.
+            crate::video::sync::set_paired(guard.len());
         }
     }
 
     pub fn add_inbound_trusted(&self, id: EndpointId) {
         if let Ok(mut guard) = self.inbound_trusted.lock() {
             guard.insert(id);
+            crate::video::sync::set_paired(guard.len());
         }
     }
 
     pub fn remove_inbound_trusted(&self, id: EndpointId) {
         if let Ok(mut guard) = self.inbound_trusted.lock() {
             guard.remove(&id);
+            crate::video::sync::set_paired(guard.len());
         }
     }
 
@@ -455,6 +462,7 @@ impl MultiScreenRuntime {
             library.as_ref().map(videos::Library::store),
         )
         .await;
+        tokio::spawn(publish_followers(shared.clone()));
         let (hash_tx, hash_rx) = async_channel::unbounded();
         tokio::spawn(hash_loop(hash_rx, library, broadcast_tx));
         tokio::spawn(broadcast_loop(broadcast_rx, hash_tx, shared.clone()));
@@ -554,6 +562,25 @@ async fn build_router(
             )
             .spawn(),
         None => router.spawn(),
+    }
+}
+
+/// Keep the video player's list of subscribed reflections current, so a
+/// primary holding a clip for them waits only on those still connected.
+async fn publish_followers(shared: Arc<Shared>) {
+    let mut last = Vec::new();
+    loop {
+        let mut followers: Vec<String> = match shared.subscribers.lock() {
+            Ok(guard) => guard.iter().map(|s| s.endpoint_id.to_string()).collect(),
+            Err(_) => Vec::new(),
+        };
+        followers.sort();
+        followers.dedup();
+        if followers != last {
+            crate::video::sync::set_followers(followers.clone());
+            last = followers;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 

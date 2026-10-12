@@ -39,6 +39,22 @@ pub async fn run(
                 let clock_ns = trusted.then(crate::video::clock::now);
                 let _ = req.tx.send(TimeResponse { clock_ns }).await;
             }
+            DisplayMessage::Ready(req) => {
+                let report = &req.inner;
+                let trusted = shared
+                    .inbound_trusted
+                    .lock()
+                    .map(|t| t.contains(&report.endpoint_id))
+                    .unwrap_or(false);
+                if trusted {
+                    crate::video::sync::set_readiness(
+                        report.endpoint_id.to_string(),
+                        report.node,
+                        report.readiness.clone(),
+                    );
+                }
+                let _ = req.tx.send(()).await;
+            }
         }
     }
 }
@@ -184,10 +200,30 @@ async fn handle_subscribe(
         }
     }
 
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let watch = tx.clone();
     if let Ok(mut guard) = shared.subscribers.lock() {
         guard.push(Subscriber {
+            id,
             endpoint_id,
             sender: tx,
         });
     }
+
+    // Forget the subscription as soon as the reflection goes away. Sending to
+    // it would notice too, but only at the next broadcast — and a primary
+    // holding a clip for its reflections broadcasts next to nothing, so it
+    // would wait on a screen that is gone. By id, not endpoint: a reflection
+    // that reconnected quickly has a newer subscription to keep.
+    tokio::spawn(async move {
+        watch.closed().await;
+        if let Ok(mut guard) = shared.subscribers.lock() {
+            guard.retain(|s| s.id != id);
+        }
+        log::info!(
+            "multi_screen: reflection {} unsubscribed",
+            endpoint_id.fmt_short()
+        );
+    });
 }

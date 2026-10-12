@@ -322,6 +322,7 @@ impl Cache {
         // Say it has started, so the screen shows a download rather than
         // "waiting" until the first progress report.
         for r in refs {
+            crate::video::sync::set_progress(&r.path, 0.0);
             let update = LayoutUpdate::VideoProgress {
                 path: r.path.clone(),
                 received: 0,
@@ -349,6 +350,10 @@ impl Cache {
                     {
                         last_report = std::time::Instant::now();
                         for r in refs {
+                            if r.size > 0 {
+                                let done = (received as f64 / r.size as f64).min(1.0) as f32;
+                                crate::video::sync::set_progress(&r.path, done);
+                            }
                             let update = LayoutUpdate::VideoProgress {
                                 path: r.path.clone(),
                                 received,

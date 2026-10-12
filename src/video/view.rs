@@ -46,6 +46,7 @@ impl Component for VideoView {
                 muted: self.node.muted,
                 looping: self.node.looping,
                 shuffle: self.node.shuffle,
+                wait: self.node.wait_for_reflections,
             };
             let inhibitor = self.inhibitor.clone();
             move || {
@@ -98,8 +99,13 @@ impl Component for VideoView {
             return notice(why.clone(), muted_text);
         }
 
+        let waiting = match &*player.shared().status.lock().unwrap() {
+            Status::Waiting { screens, progress } => Some(waiting_caption(*screens, *progress)),
+            _ => None,
+        };
+
         let shared = player.shared().clone();
-        rect().expanded().child(
+        let view = rect().expanded().child(
             canvas(RenderCallback::new(move |ctx: &mut CanvasContext| {
                 painter.borrow_mut().paint(ctx, &shared, fit);
             }))
@@ -107,11 +113,36 @@ impl Component for VideoView {
             // compares equal, so a new key per frame is what forces the paint.
             .key(*frames.read())
             .expanded(),
-        )
+        );
+        match waiting {
+            // Over the paused first frame, so the host can see why it waits.
+            Some(caption) => view.child(
+                rect()
+                    .position(Position::new_absolute().bottom(16.).left(16.))
+                    .padding((6., 12.))
+                    .corner_radius(8.)
+                    .background((0, 0, 0, 160))
+                    .child(label().color(muted_text).text(caption)),
+            ),
+            None => view,
+        }
     }
 
     fn render_key(&self) -> DiffKey {
         DiffKey::from(&self.node)
+    }
+}
+
+/// "Waiting for 2 screens… 40%".
+fn waiting_caption(screens: usize, progress: Option<f32>) -> String {
+    let who = if screens == 1 {
+        "1 screen".to_string()
+    } else {
+        format!("{screens} screens")
+    };
+    match progress {
+        Some(done) => format!("Waiting for {who}… {:.0}%", done * 100.0),
+        None => format!("Waiting for {who}…"),
     }
 }
 
