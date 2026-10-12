@@ -460,7 +460,7 @@ fn bytes_to_endpoint_id(bytes: &[u8]) -> Result<EndpointId> {
 /// `~/.local/share/xyz.mooshq.GuestInfoDisplay` when `XDG_DATA_HOME` is unset.
 /// In a Flatpak sandbox `$XDG_DATA_HOME` is already scoped to the app, so the
 /// subdirectory is redundant but harmless.
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     let base = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

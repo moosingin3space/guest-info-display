@@ -224,12 +224,21 @@ back.
 ### Multiple displays
 
 A **primary** owns the layout. Pair a **reflection** to it and the document is
-pushed across, with its images, and re-pushed on every edit — so re-theming a
-party means editing one file on one machine.
+pushed across, with its images and videos, and re-pushed on every edit — so
+re-theming a party means editing one file on one machine.
 
 A reflection ignores its own `layout.kdl` entirely, and remembers the last one
 it was sent, so a display that reboots before its primary is up still comes
 back in the party's colours instead of flashing the built-in default.
+
+Videos travel separately from the rest, because they are big. The primary
+fingerprints each clip where it sits — no copy — and serves it only to its
+paired reflections; each reflection downloads the clips it is missing, keeps
+them in its own data directory, and deletes any the current layout no longer
+uses. An interrupted download resumes where it stopped, and a clip shared by
+two layouts is fetched once. A reflection's video starts as soon as its first
+clip arrives and picks up the rest as they land. Playback is not synchronised
+between screens: each one plays the playlist on its own clock.
 
 What does *not* mirror is anything local to a device: each screen shows its own
 clock, its own role label, and — importantly — its own Wi-Fi QR code. Two

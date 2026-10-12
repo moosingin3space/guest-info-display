@@ -53,7 +53,7 @@ A modular Rust desktop application using [Freya](https://freyaui.dev/) (0.4.3, S
 
 - `src/main.rs`: Entry point and UI orchestration. Owns the `Model`, starts the Freya tasks for clock/Spotify/pairing, and renders the top-level view.
 - `src/spotify.rs`: Integration with Spotify Connect via `librespot`. Runs a background Tokio runtime for discovery and playback events, exposing a `SharedSpotifyState` (Mutex-protected) and an event channel to the UI.
-- `src/multi_screen.rs`: iroh-based pairing and state mirroring between a primary and its reflections.
+- `src/multi_screen.rs`: iroh-based pairing and state mirroring between a primary and its reflections. `multi_screen/videos.rs` mirrors video files over iroh-blobs: the primary hashes them in place into an `FsStore` and serves them only to trusted reflections (connection-intercepting provider events); a reflection keeps a `videos/<hash>.<ext>` cache, pruned to each layout's hashes, with resumable per-hash incoming stores.
 - `src/persistence.rs`: SQLite-backed settings storage using `rusqlite` (bundled). Stores Wi-Fi credentials, role, audio device, paired peers and the iroh identity.
 - `src/qr_code.rs`: Wi-Fi QR code generation using `qrcodegen`, drawn with Skia calls in a Freya `canvas`.
 - `src/settings_dialog.rs`: The settings form, rendered inside a Freya `Popup`.

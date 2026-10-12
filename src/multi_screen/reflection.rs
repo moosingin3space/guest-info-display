@@ -11,6 +11,7 @@ use async_channel::Sender as AsyncSender;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::oneshot;
 
+use super::videos::Cache;
 use super::{
     ALPN, LayoutUpdate,
     proto::{DisplayProtocol, PairingRequest, PairingResponse, SubscribeRequest, WireMessage},
@@ -115,6 +116,9 @@ async fn run_session(
 
     log::info!("reflection: subscribed to primary {}", primary.fmt_short());
 
+    // Fetching the current layout's videos. Replaced by each new layout, and
+    // aborted with the session; partial downloads resume next time.
+    let mut video_sync: Option<AbortOnDrop> = None;
     let mut connected = false;
     while let Some(msg) = rx.recv().await? {
         match msg {
@@ -143,7 +147,7 @@ async fn run_session(
                     return Ok(SessionEnd::ConsumerGone);
                 }
             }
-            WireMessage::Layout { source } => {
+            WireMessage::Layout { source, videos } => {
                 if layouts_tx
                     .send(LayoutUpdate::Document(source))
                     .await
@@ -151,6 +155,12 @@ async fn run_session(
                 {
                     return Ok(SessionEnd::ConsumerGone);
                 }
+                let (endpoint, layouts_tx) = (endpoint.clone(), layouts_tx.clone());
+                video_sync = Some(AbortOnDrop(tokio::spawn(async move {
+                    Cache::new()
+                        .sync(&endpoint, primary, &videos, &layouts_tx)
+                        .await;
+                })));
             }
             WireMessage::Asset { path, encoded } => {
                 if layouts_tx
@@ -164,5 +174,15 @@ async fn run_session(
         }
     }
 
+    drop(video_sync);
     Ok(SessionEnd::ChannelClosed)
+}
+
+/// Aborts its task when dropped, so a session that ends stops its downloads.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }

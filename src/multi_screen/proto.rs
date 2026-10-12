@@ -14,6 +14,7 @@ use irpc::channel::{mpsc, oneshot};
 use irpc::rpc_requests;
 use serde::{Deserialize, Serialize};
 
+use super::videos::VideoRef;
 use crate::spotify::SpotifyState;
 
 #[rpc_requests(message = DisplayMessage, no_spans)]
@@ -74,7 +75,14 @@ pub enum WireMessage {
     /// implementation, one set of diagnostics, and a wire that does not change
     /// every time a widget is added. The primary only ever sends source it has
     /// already parsed, so a reflection failing to parse it means version skew.
-    Layout { source: String },
+    ///
+    /// `videos` names the content behind each `video` path. The files
+    /// themselves are too big for this stream; the reflection fetches them
+    /// over iroh-blobs by hash.
+    Layout {
+        source: String,
+        videos: Vec<VideoRef>,
+    },
 
     /// Encoded bytes behind one `image` node of the current layout.
     ///
@@ -120,7 +128,11 @@ mod tests {
             },
             WireMessage::CoversCleared,
             WireMessage::Layout {
-                source: "root { clock }".into(),
+                source: "root { video \"ghosts.mp4\" }".into(),
+                videos: vec![VideoRef {
+                    path: "ghosts.mp4".into(),
+                    hash: iroh_blobs::Hash::new(b"not really a video"),
+                }],
             },
             WireMessage::Asset {
                 path: "ana.jpg".into(),

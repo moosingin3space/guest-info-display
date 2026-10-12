@@ -230,7 +230,8 @@ fn publish_layout(m: &mut Model) {
         .iter()
         .map(|(path, asset)| (path.clone(), asset.bytes.to_vec()))
         .collect();
-    m.multi_screen.broadcast_layout(source, bundle);
+    let videos = m.assets.video_files();
+    m.multi_screen.broadcast_layout(source, bundle, videos);
 }
 
 /// Apply a layout the primary pushed us, and remember it across reboots.
@@ -264,6 +265,9 @@ async fn layout_listener(
             }
             multi_screen::LayoutUpdate::Asset { path, encoded } => {
                 m.assets.insert(path, bytes::Bytes::from(encoded));
+            }
+            multi_screen::LayoutUpdate::Video { path, file } => {
+                m.assets.insert_video(path, file);
             }
         }
     }
