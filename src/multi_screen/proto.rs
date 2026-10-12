@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use super::videos::VideoRef;
 use crate::spotify::SpotifyState;
-use crate::video::sync::Cue;
+use crate::video::sync::{Cue, Readiness};
 
 #[rpc_requests(message = DisplayMessage, no_spans)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +35,19 @@ pub enum DisplayProtocol {
     /// current time, and the reflection times the trip on its own clock.
     #[rpc(tx = oneshot::Sender<TimeResponse>)]
     Time(TimeRequest),
+
+    /// A reflection's progress towards starting a pending clip — see
+    /// `crate::video::sync::Readiness`. Sent whenever it changes.
+    #[rpc(tx = oneshot::Sender<()>)]
+    Ready(ReadyReport),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyReport {
+    /// Checked against the paired set, like `Subscribe`.
+    pub endpoint_id: EndpointId,
+    pub node: u32,
+    pub readiness: Readiness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +180,7 @@ mod tests {
                 current: "ghosts.mp4".into(),
                 pos0: 123_456_789_000,
                 next: Some("bats.mp4".into()),
+                pending: false,
             }),
         ];
 

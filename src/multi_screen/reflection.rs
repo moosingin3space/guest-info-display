@@ -15,8 +15,8 @@ use super::videos::Cache;
 use super::{
     ALPN, LayoutUpdate,
     proto::{
-        DisplayProtocol, PairingRequest, PairingResponse, SubscribeRequest, TimeRequest,
-        WireMessage,
+        DisplayProtocol, PairingRequest, PairingResponse, ReadyReport, SubscribeRequest,
+        TimeRequest, WireMessage,
     },
 };
 use crate::spotify::{CoverImage, Event, SharedSpotifyState, SpotifyState};
@@ -125,6 +125,11 @@ async fn run_session(
     let mut video_sync: Option<AbortOnDrop> = None;
     // Measuring the primary's clock for as long as the session lasts.
     let _time_sync = AbortOnDrop(tokio::spawn(sync_clock(client.clone(), endpoint.id())));
+    // Telling the primary how close we are to starting a clip it holds.
+    let _readiness = AbortOnDrop(tokio::spawn(report_readiness(
+        client.clone(),
+        endpoint.id(),
+    )));
     let mut connected = false;
     while let Some(msg) = rx.recv().await? {
         match msg {
@@ -206,6 +211,31 @@ async fn sync_clock(client: irpc::Client<DisplayProtocol>, endpoint_id: Endpoint
         sent += 1;
         let pause = if sent < BURST { 50 } else { 1000 };
         tokio::time::sleep(Duration::from_millis(pause)).await;
+    }
+}
+
+/// Pass the video players' readiness reports on to the primary, each time one
+/// changes. A primary holding a clip waits on these.
+async fn report_readiness(client: irpc::Client<DisplayProtocol>, endpoint_id: EndpointId) {
+    let mut sent = std::collections::HashMap::new();
+    loop {
+        for (node, readiness) in crate::video::sync::reports() {
+            if sent.get(&node) == Some(&readiness) {
+                continue;
+            }
+            let report = ReadyReport {
+                endpoint_id,
+                node,
+                readiness: readiness.clone(),
+            };
+            match client.rpc(report).await {
+                Ok(()) => {
+                    sent.insert(node, readiness);
+                }
+                Err(e) => log::debug!("reflection: readiness report failed: {e}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

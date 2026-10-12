@@ -146,7 +146,7 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `wifi-qr` | `heading`, `size` (220) |
 | `text` | The string to show, as the first argument |
 | `image` | Path as the first argument, `fit="cover"` or `"contain"` |
-| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`) |
+| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`), `wait-for-reflections` (`#false`) |
 | `role-label` | This device's role and short id |
 | `settings-button` | `size` (24) |
 
@@ -256,6 +256,15 @@ The screens agree to within one refresh of the displays themselves; what a TV
 adds afterwards — its own processing delay — is beyond the app's reach, so set
 matching picture modes ("Game" mode usually minimises the delay) on TVs that
 can be seen together.
+
+**Starting together.** Give a `video` `wait-for-reflections=#true` and the
+primary holds its first clip on the first frame — captioned "Waiting for 1
+screen… 40%" — until every connected reflection has that clip downloaded and
+loaded, then starts them all on the same instant. It waits as long as that
+takes, but never for a screen that has disconnected, and only for the very
+first start: the rest of the playlist keeps downloading while it plays. At a
+cold start it also gives paired reflections that have not connected yet ten
+seconds to arrive.
 
 What does *not* mirror is anything local to a device: each screen shows its own
 clock, its own role label, and — importantly — its own Wi-Fi QR code. Two

@@ -720,6 +720,9 @@ impl<'a> Parser<'a> {
             muted: self.opt_bool(entries, "muted").unwrap_or(true),
             looping: self.opt_bool(entries, "loop").unwrap_or(true),
             shuffle: self.opt_bool(entries, "shuffle").unwrap_or(false),
+            wait_for_reflections: self
+                .opt_bool(entries, "wait-for-reflections")
+                .unwrap_or(false),
         })
     }
 
@@ -1243,6 +1246,7 @@ mod tests {
                 muted: true,
                 looping: true,
                 shuffle: false,
+                wait_for_reflections: false,
             }
         );
     }
@@ -1252,7 +1256,7 @@ mod tests {
         let (v, diagnostics) = video_of(
             r#"
             root {
-                video "intro.mp4" fit="contain" muted=#false loop=#false shuffle=#true {
+                video "intro.mp4" fit="contain" muted=#false loop=#false shuffle=#true wait-for-reflections=#true {
                     item "clips/bats.mkv"
                     item "clips/fog.webm"
                 }
@@ -1262,7 +1266,7 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(v.items, ["intro.mp4", "clips/bats.mkv", "clips/fog.webm"]);
         assert_eq!(v.fit, Fit::Contain);
-        assert!(!v.muted && !v.looping && v.shuffle);
+        assert!(!v.muted && !v.looping && v.shuffle && v.wait_for_reflections);
     }
 
     #[test]
