@@ -73,6 +73,8 @@ pub struct Assets {
     wanted_videos: Vec<String>,
     /// Where each wanted video can be read from, for those that can.
     videos: HashMap<String, PathBuf>,
+    /// Bytes received and expected, for videos a reflection is downloading.
+    progress: HashMap<String, (u64, u64)>,
 }
 
 impl Assets {
@@ -85,6 +87,7 @@ impl Assets {
             errors: HashMap::new(),
             wanted_videos: video_paths(root),
             videos: HashMap::new(),
+            progress: HashMap::new(),
         }
     }
 
@@ -138,6 +141,7 @@ impl Assets {
             errors,
             wanted_videos,
             videos,
+            progress: HashMap::new(),
         }
     }
 
@@ -168,8 +172,27 @@ impl Assets {
     /// can finish after the next one arrived.
     pub fn insert_video(&mut self, path: String, file: PathBuf) {
         if self.wanted_videos.contains(&path) {
+            self.progress.remove(&path);
             self.videos.insert(path, file);
         }
+    }
+
+    /// How far a reflection has got downloading a video. Ignored for paths the
+    /// current document does not name, like `insert_video`.
+    pub fn set_progress(&mut self, path: String, received: u64, total: u64) {
+        if self.wanted_videos.contains(&path) && !self.videos.contains_key(&path) {
+            self.progress.insert(path, (received, total));
+        }
+    }
+
+    /// Download progress for a video, `0.0..=1.0`, while one is under way.
+    pub fn progress(&self, path: &str) -> Option<f32> {
+        let (received, total) = *self.progress.get(path)?;
+        Some(if total == 0 {
+            0.0
+        } else {
+            (received as f64 / total as f64).clamp(0.0, 1.0) as f32
+        })
     }
 
     /// Bytes that arrived from the primary.
@@ -180,7 +203,7 @@ impl Assets {
 
     /// Wanted paths we have no bytes for, each with a reason a host can act
     /// on. Document order, so the list is stable between renders.
-    pub fn missing(&self) -> Vec<(&str, &str)> {
+    pub fn missing(&self) -> Vec<(&str, String)> {
         let images = self.wanted.iter().filter(|p| !self.bytes.contains_key(*p));
         let videos = self
             .wanted_videos
@@ -189,11 +212,13 @@ impl Assets {
         images
             .chain(videos)
             .map(|p| {
-                let why = self
-                    .errors
-                    .get(p)
-                    .map(String::as_str)
-                    .unwrap_or("not sent by the primary yet");
+                let why = match (self.errors.get(p), self.progress(p)) {
+                    (Some(error), _) => error.clone(),
+                    (None, Some(done)) => {
+                        format!("receiving from the primary, {:.0}%", done * 100.0)
+                    }
+                    (None, None) => "not sent by the primary yet".to_string(),
+                };
                 (p.as_str(), why)
             })
             .collect()
@@ -323,7 +348,7 @@ mod tests {
         let mut assets = Assets::expecting(&root);
         assert_eq!(
             assets.missing(),
-            vec![("ana.jpg", "not sent by the primary yet")]
+            vec![("ana.jpg", "not sent by the primary yet".to_string())]
         );
 
         assets.insert("ana.jpg".to_string(), Bytes::from_static(b"\x89PNG"));
@@ -364,7 +389,10 @@ mod tests {
         let assets = Assets::from_disk(&root, &dir);
 
         assert!(assets.get("there.png").is_some(), "the file that is there");
-        assert_eq!(assets.missing(), vec![("gone.png", "file not found")]);
+        assert_eq!(
+            assets.missing(),
+            vec![("gone.png", "file not found".to_string())]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -397,12 +425,38 @@ mod tests {
         assert_eq!(
             assets.missing(),
             vec![
-                ("photo.png", "file not found"),
-                ("fog.mkv", "file not found")
+                ("photo.png", "file not found".to_string()),
+                ("fog.mkv", "file not found".to_string())
             ]
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_reflection_reports_download_progress_until_the_file_lands() {
+        let root = root_of(r#"root { video "bats.mp4" }"#);
+        let mut assets = Assets::expecting(&root);
+        assert_eq!(assets.progress("bats.mp4"), None);
+
+        assets.set_progress("bats.mp4".to_string(), 250, 1000);
+        assert_eq!(assets.progress("bats.mp4"), Some(0.25));
+        assert_eq!(
+            assets.missing(),
+            vec![("bats.mp4", "receiving from the primary, 25%".to_string())]
+        );
+
+        // Progress for a path the document does not name goes nowhere.
+        assets.set_progress("other.mp4".to_string(), 1, 2);
+        assert_eq!(assets.progress("other.mp4"), None);
+
+        assets.insert_video("bats.mp4".to_string(), PathBuf::from("/cache/b.mp4"));
+        assert_eq!(
+            assets.progress("bats.mp4"),
+            None,
+            "done, so no longer in flight"
+        );
+        assert!(assets.missing().is_empty());
     }
 
     #[test]

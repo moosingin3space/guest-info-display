@@ -284,7 +284,7 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
             .missing()
             .into_iter()
             .take(6)
-            .map(|(path, why)| (path.to_string(), why.to_string()))
+            .map(|(path, why)| (path.to_string(), why))
             .collect();
         (
             status,

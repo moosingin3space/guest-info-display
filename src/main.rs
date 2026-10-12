@@ -275,6 +275,13 @@ async fn layout_listener(
             multi_screen::LayoutUpdate::Video { path, file } => {
                 m.assets.insert_video(path, file);
             }
+            multi_screen::LayoutUpdate::VideoProgress {
+                path,
+                received,
+                total,
+            } => {
+                m.assets.set_progress(path, received, total);
+            }
         }
     }
 }
