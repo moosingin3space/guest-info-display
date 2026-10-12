@@ -145,7 +145,7 @@ pub enum Direction {
     Row,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fit {
     Cover,
     Contain,
@@ -195,10 +195,29 @@ pub enum Widget {
         path: String,
         fit: Fit,
     },
+    /// A playlist of video files, played back to back.
+    Video(Video),
     RoleLabel,
     SettingsButton {
         size: f32,
     },
+}
+
+/// A `video` node's playlist and playback options.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Video {
+    /// Paths relative to the layout file's directory, validated like `image`
+    /// paths. Never empty.
+    pub items: Vec<String>,
+    pub fit: Fit,
+    /// Muted skips decoding the audio track entirely; unmuted plays it as its
+    /// own audio stream, so the host mixes it against Spotify in the system
+    /// mixer rather than in this app.
+    pub muted: bool,
+    /// Start over after the last item rather than holding its final frame.
+    pub looping: bool,
+    /// Play in a fresh random order on every pass through the list.
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
