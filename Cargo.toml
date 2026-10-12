@@ -18,13 +18,24 @@ freya = { version = "=0.4.3", features = ["engine"] }
 # mismatch panics instead of silently building Skia from source.
 # default-features = false so this entry adds no features to the key.
 freya-skia-bindings = { version = "=0.98.1", default-features = false, features = ["no-compile"] }
+fastrand = "2"
 futures-util = "0.3"
+# GL entry points for importing decoded video frames, loaded through EGL.
+gl = "0.14"
+# Video playback. `v1_24`: DMA-BUF caps (`VideoInfoDmaDrm`) and appsink's
+# propose-allocation callback, which the zero-copy path needs.
+gstreamer = "0.25"
+gstreamer-allocators = "0.25"
+gstreamer-app = { version = "0.25", features = ["v1_24"] }
+gstreamer-video = { version = "0.25", features = ["v1_24"] }
 http = "1"
 iroh = "1"
 iroh-mdns-address-lookup = "0.6"
 irpc = { version = "0.17", features = ["derive", "rpc"] }
 irpc-iroh = "0.17"
 kdl = "6"
+# eglCreateImage on Freya's own EGL display, for DMA-BUF video frames.
+khronos-egl = { version = "6", features = ["static"] }
 librespot = { git = "https://github.com/librespot-org/librespot", features = ["rodio-backend"] }
 log = "0.4.29"
 # kdl hands out miette::SourceSpan but doesn't re-export the crate.
@@ -33,17 +44,12 @@ pretty_env_logger = "0.5.0"
 qrcodegen = "1.8.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+# The skia-safe Freya's engine is built on, for wrapping video frames as GPU
+# textures. Pinned with freya-skia-bindings; `gl` is already on through Freya.
+skia-safe = { package = "freya-skia-safe", version = "=0.98.1", features = ["gl"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 vergen = "=10.0.3"
 
 [dev-dependencies]
-gl = "0.14.0"
-gstreamer = "0.25.4"
-gstreamer-allocators = "0.25.4"
-gstreamer-app = { version = "0.25.2", features = ["v1_24"] }
-gstreamer-video = { version = "0.25.4", features = ["v1_24"] }
-khronos-egl = { version = "6.0.0", features = ["static"] }
 postcard = { version = "1", features = ["alloc"] }
-# Same skia-safe as Freya's engine; the video spike wraps GL textures directly.
-skia-safe = { package = "freya-skia-safe", version = "=0.98.1", features = ["gl"] }

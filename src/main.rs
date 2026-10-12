@@ -14,6 +14,7 @@ mod persistence;
 mod qr_code;
 mod settings_dialog;
 mod spotify;
+mod video;
 
 /// Whichever task tree is producing `(state, events)` for the UI consumer.
 /// Holding the appropriate variant keeps that backend alive; replacing it
@@ -166,7 +167,7 @@ fn rebuild_backend(mut model: State<Model>) {
     // Primaries are always "connected" (they generate their own state).
     // Reflections start disconnected and flip on the first snapshot.
     m.connected = matches!(m.role, persistence::Role::Primary);
-    m.inhibitor.set(false);
+    m.inhibitor.set(inhibitor::Source::Spotify, false);
 
     let new_backend = match m.role {
         persistence::Role::Primary => {
@@ -282,7 +283,7 @@ async fn spotify_listener(
                     m.queue = sp.queue.clone();
                     if sp.is_playing != m.is_playing {
                         m.is_playing = sp.is_playing;
-                        m.inhibitor.set(sp.is_playing);
+                        m.inhibitor.set(inhibitor::Source::Spotify, sp.is_playing);
                     }
                     m.multi_screen.broadcast_state(sp.clone());
                 }
@@ -712,7 +713,17 @@ fn approval_popup(model: State<Model>, m: &Model) -> Popup {
 }
 
 fn main() {
+    // Before anything spawns a thread: setting the environment is only sound
+    // while the process is single-threaded. Freya defaults to Vulkan on Linux,
+    // but zero-copy video imports frames on the EGL context of its OpenGL
+    // renderer, so prefer that unless the user chose otherwise.
+    if std::env::var_os("FREYA_RENDERER").is_none() {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("FREYA_RENDERER", "opengl") };
+    }
+
     pretty_env_logger::init();
+    video::init();
 
     // Freya runs its own executor. The backends start their own runtimes;
     // this one only drives UI-side timers such as the clock.

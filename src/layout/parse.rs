@@ -17,7 +17,7 @@ use miette::SourceSpan;
 
 use super::schema::{
     Align, Background, Container, Direction, Fit, GradientDirection, GradientStop, Node, Padding,
-    Rgba, Sizing, Style, TextAlign, Theme, Typography, Weight, When, Widget,
+    Rgba, Sizing, Style, TextAlign, Theme, Typography, Video, Weight, When, Widget,
 };
 use super::{Diagnostic, Severity, line_col};
 
@@ -29,6 +29,8 @@ pub const MAX_NODES: usize = 512;
 pub const MAX_DEPTH: usize = 32;
 /// Beyond this the queue can't be read from across a room anyway.
 pub const MAX_UP_NEXT: usize = 25;
+/// A night's worth of clips is dozens, not thousands.
+pub const MAX_PLAYLIST: usize = 100;
 
 /// Widget and container node names, for dispatch and for "did you mean".
 const WIDGET_NAMES: &[&str] = &[
@@ -44,6 +46,7 @@ const WIDGET_NAMES: &[&str] = &[
     "wifi-qr",
     "text",
     "image",
+    "video",
     "role-label",
     "settings-button",
 ];
@@ -614,6 +617,7 @@ impl<'a> Parser<'a> {
                     .unwrap_or(Fit::Cover);
                 Widget::Image { path, fit }
             }
+            "video" => Widget::Video(self.video(node, &mut entries)?),
             "role-label" => Widget::RoleLabel,
             "settings-button" => Widget::SettingsButton {
                 size: self.opt_number(&mut entries, "size").unwrap_or(24.0),
@@ -637,6 +641,68 @@ impl<'a> Parser<'a> {
         }
 
         Some(Node { style, widget })
+    }
+
+    /// `video "a.mp4" "b.mp4"`, or one `item "a.mp4"` child per clip, or both
+    /// — positional items first. One bad path drops that clip, not the node:
+    /// the rest of the night's playlist still plays.
+    fn video(&mut self, node: &KdlNode, entries: &mut Entries<'_>) -> Option<Video> {
+        let mut sources: Vec<&KdlEntry> = entries.args.clone();
+        if let Some(doc) = node.children() {
+            for child in doc.nodes() {
+                if child.name().value() != "item" {
+                    self.error(
+                        child.span(),
+                        format!(
+                            "unknown `video` child `{}`, expected `item`",
+                            child.name().value()
+                        ),
+                    );
+                    continue;
+                }
+                match Entries::new(child).arg(0) {
+                    Some(entry) => sources.push(entry),
+                    None => self.error(child.span(), "`item` needs a path"),
+                }
+            }
+        }
+
+        let mut items = Vec::new();
+        for entry in sources {
+            let Some(path) = self.string(entry, "video") else {
+                continue;
+            };
+            if let Err(why) = validate_asset_path(&path) {
+                self.error(entry.span(), format!("`{path}`: {why}"));
+                continue;
+            }
+            if items.len() == MAX_PLAYLIST {
+                self.warn(
+                    entry.span(),
+                    format!("playlist clamped to the {MAX_PLAYLIST} item maximum"),
+                );
+                break;
+            }
+            items.push(path);
+        }
+
+        if items.is_empty() {
+            self.error(node.span(), "`video` needs at least one file to play");
+            return None;
+        }
+
+        Some(Video {
+            items,
+            fit: entries
+                .take("fit")
+                .and_then(|e| self.keyword(e, "fit", FITS))
+                .unwrap_or(Fit::Cover),
+            // Muted by default: the music is the party's soundtrack, and a
+            // clip that talks over it should be a deliberate choice.
+            muted: self.opt_bool(entries, "muted").unwrap_or(true),
+            looping: self.opt_bool(entries, "loop").unwrap_or(true),
+            shuffle: self.opt_bool(entries, "shuffle").unwrap_or(false),
+        })
     }
 
     fn report_leftovers(&mut self, entries: &Entries<'_>) {
@@ -1108,6 +1174,85 @@ mod tests {
         assert_eq!(parse_color("#fff"), None);
         assert_eq!(parse_color("ffffff"), None);
         assert_eq!(parse_color("#gggggg"), None);
+    }
+
+    fn video_of(source: &str) -> (Video, Vec<Diagnostic>) {
+        let p = ok(source);
+        match &children_of(&p.root.expect("root"))[0].widget {
+            Widget::Video(v) => (v.clone(), p.diagnostics),
+            other => panic!("expected a video, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_single_video_defaults_to_a_muted_cover_loop() {
+        let (v, diagnostics) = video_of(r#"root { video "ghosts.mp4" }"#);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            v,
+            Video {
+                items: vec!["ghosts.mp4".to_string()],
+                fit: Fit::Cover,
+                muted: true,
+                looping: true,
+                shuffle: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_playlist_takes_arguments_then_items_with_options() {
+        let (v, diagnostics) = video_of(
+            r#"
+            root {
+                video "intro.mp4" fit="contain" muted=#false loop=#false shuffle=#true {
+                    item "clips/bats.mkv"
+                    item "clips/fog.webm"
+                }
+            }
+            "#,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(v.items, ["intro.mp4", "clips/bats.mkv", "clips/fog.webm"]);
+        assert_eq!(v.fit, Fit::Contain);
+        assert!(!v.muted && !v.looping && v.shuffle);
+    }
+
+    #[test]
+    fn a_bad_playlist_entry_drops_only_that_clip() {
+        let (v, diagnostics) = video_of(
+            r#"
+            root {
+                video {
+                    item "../escape.mp4"
+                    item "fine.mp4"
+                    reel "not-an-item.mp4"
+                }
+            }
+            "#,
+        );
+        assert_eq!(v.items, ["fine.mp4"]);
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(diagnostics.iter().all(|d| d.severity == Severity::Error));
+    }
+
+    #[test]
+    fn a_video_with_nothing_to_play_is_skipped() {
+        let p = ok("root {\n  video\n  clock\n}");
+        let root = p.root.expect("root");
+        assert_eq!(children_of(&root).len(), 1, "the clock survives");
+        assert!(p.diagnostics[0].message.contains("at least one file"));
+        assert_eq!(p.diagnostics[0].line, 2);
+    }
+
+    #[test]
+    fn an_oversized_playlist_is_clamped() {
+        let items: String = (0..MAX_PLAYLIST + 5)
+            .map(|i| format!("item \"{i}.mp4\"\n"))
+            .collect();
+        let (v, diagnostics) = video_of(&format!("root {{ video {{\n{items}}} }}"));
+        assert_eq!(v.items.len(), MAX_PLAYLIST);
+        assert_eq!(diagnostics[0].severity, Severity::Warning);
     }
 
     #[test]

@@ -42,7 +42,7 @@ build fetches it as a source of the app module and points `SKIA_BINARIES_URL` at
 Freya means bumping `freya-skia-bindings` and the app module's URLs and checksums
 together — see `plans/freya-skia-port.md`.
 
-Plain host `cargo build` works only where the linker finds `libstdc++`, EGL/GL,
+Plain host `cargo build` works only where the linker finds `libstdc++`, EGL/GL, GStreamer,
 Wayland and fontconfig dev libraries; otherwise use the SDK recipes above.
 
 ## Architecture
@@ -57,7 +57,8 @@ A modular Rust desktop application using [Freya](https://freyaui.dev/) (0.4.3, S
 - `src/persistence.rs`: SQLite-backed settings storage using `rusqlite` (bundled). Stores Wi-Fi credentials, role, audio device, paired peers and the iroh identity.
 - `src/qr_code.rs`: Wi-Fi QR code generation using `qrcodegen`, drawn with Skia calls in a Freya `canvas`.
 - `src/settings_dialog.rs`: The settings form, rendered inside a Freya `Popup`.
-- `src/inhibitor.rs`: XDG idle-inhibit portal while playback is active.
+- `src/inhibitor.rs`: XDG idle-inhibit portal, held while Spotify or any video is playing (one `Source` each).
+- `src/video/`: `video` layout nodes. `VideoView` (a Freya component per node) owns a GStreamer `playbin3` pipeline (`player.rs`) and paints its frames into a canvas (`paint.rs`); `playlist.rs` is the pure play-order logic.
 
 ### UI Structure
 
@@ -87,6 +88,7 @@ Popups: pairing approval, settings
 - **Clock**: a separate `State<DateTime<Local>>` updated every second by a Freya task sleeping on `tokio::time` (`main` enters a small Tokio runtime for this).
 - **Spotify**: `rebuild_backend` starts the primary (librespot) or reflection backend and a listener task forwarding its events (StateChanged, CoverLoaded, …) into the model. Covers are kept as encoded bytes keyed by URL.
 - **UI scale**: `use_ui_zoom` sets Freya's per-window zoom from the physical window width (`DESIGN_WIDTH` 1280, capped at 1.75), so layout code uses plain design sizes.
+- **Video**: frames take a zero-copy path when VA-API is present and Freya is on its OpenGL renderer — `vapostproc` exports packed-RGB DMA-BUFs (radeonsi offers only tiled modifiers, so the `drm-format` is read from its pad template) and `paint.rs` imports them with `eglCreateImage` on Freya's current EGL context, then has Skia borrow the GL texture. `main` therefore defaults `FREYA_RENDERER=opengl` (Freya defaults to Vulkan on Linux). Otherwise frames are copied as RGBA. The appsink must advertise `GstVideoMeta` in its allocation query or vapostproc refuses DMA-BUF output. Gapless `about-to-finish` cuts are only used when muted or when a file loops onto itself: an unmuted cut between clips with different stream sets stalls playbin3.
 - **zbus**: `ashpd` must stay on its `async-io` feature. Its default `tokio` feature switches zbus to Tokio process-wide and Freya's own zbus threads panic.
 
 ### Visual Design

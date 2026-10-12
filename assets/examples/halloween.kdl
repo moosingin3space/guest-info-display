@@ -1,0 +1,53 @@
+// A Halloween screen: a looping, shuffled playlist of spooky clips takes most
+// of the panel, with the music and the Wi-Fi code in a narrow column beside it.
+//
+// Put this file and a `clips/` folder in one folder and import it from
+// Settings → Layout; only the clips named below are copied in. The clips are
+// muted, so the party playlist on Spotify stays the soundtrack — set
+// `muted=#false` to hear them, then balance the two in your system mixer.
+
+theme {
+    background {
+        gradient to="bottom" {
+            stop "#0d0614" 0
+            stop "#2a0e2e" 70
+            stop "#4a1a08" 100
+        }
+    }
+
+    surface        "#ff8a1a14"
+    surface-border "#ff8a1a33"
+    placeholder    "#ffffff10"
+    text           "#ffe9d6"
+    muted-text     "#ffe9d68c"
+}
+
+root {
+    row width="fill" padding="16 28" main-align="space-between" cross-align="center" {
+        text "Happy Halloween" font-size=28 weight="bold" color="#ff8a1a"
+        clock font-size=24 mono=#true format="%H:%M"
+    }
+
+    row width="fill" flex=1 spacing=24 padding="0 28 16 28" {
+        video flex=1 height="fill" fit="cover" shuffle=#true {
+            item "clips/graveyard.mp4"
+            item "clips/bats.mp4"
+            item "clips/fog.mp4"
+            item "clips/pumpkins.mp4"
+        }
+
+        column width=300 height="fill" spacing=24 {
+            card width="fill" padding=20 when="playing" {
+                now-playing width="fill" cover-size=96 heading="Now haunting"
+            }
+            card width="fill" flex=1 padding=20 main-align="center" cross-align="center" {
+                wifi-qr heading="Join the coven" size=200
+            }
+        }
+    }
+
+    row width="fill" padding="0 28 12 28" main-align="space-between" cross-align="center" {
+        role-label
+        settings-button
+    }
+}

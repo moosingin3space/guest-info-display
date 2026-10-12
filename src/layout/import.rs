@@ -32,7 +32,7 @@ use ashpd::desktop::ResponseError;
 use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
 use async_channel::Sender as AsyncSender;
 
-use super::assets::image_paths;
+use super::assets::media_paths;
 use super::{Diagnostic, config_dir, layout_path, load, write_layout};
 
 /// Result of an import attempt, for the settings dialog to report.
@@ -52,7 +52,7 @@ pub enum Outcome {
     Rejected(Vec<Diagnostic>),
     /// The portal or the filesystem refused.
     Failed(String),
-    /// One missing image was found and copied in under the name the layout
+    /// One missing file was found and copied in under the name the layout
     /// uses for it.
     Located {
         path: String,
@@ -124,11 +124,7 @@ async fn pick_and_place(target: &str) -> Outcome {
         .accept_label("Use this file")
         .modal(true)
         .multiple(false)
-        .filter(
-            FileFilter::new("Images")
-                .mimetype("image/png")
-                .mimetype("image/jpeg"),
-        )
+        .filter(filter_for(target))
         .send()
         .await;
 
@@ -147,6 +143,28 @@ async fn pick_and_place(target: &str) -> Outcome {
 
     place(&picked, target)
 }
+
+/// What the chooser should show when locating `target`: the layout names the
+/// file, so its extension says whether a photo or a clip is wanted.
+fn filter_for(target: &str) -> FileFilter {
+    let is_video = Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| VIDEO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+    if is_video {
+        FileFilter::new("Videos")
+            .mimetype("video/mp4")
+            .mimetype("video/x-matroska")
+            .mimetype("video/webm")
+            .mimetype("video/quicktime")
+    } else {
+        FileFilter::new("Images")
+            .mimetype("image/png")
+            .mimetype("image/jpeg")
+    }
+}
+
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mkv", "webm", "mov"];
 
 /// Copy `picked` in under the name the layout asks for.
 ///
@@ -230,7 +248,7 @@ pub fn install(folder: &Path) -> Outcome {
         Ok(active) => active,
         Err(diagnostics) => return Outcome::Rejected(diagnostics),
     };
-    let wanted = image_paths(&active.doc.root);
+    let wanted = media_paths(&active.doc.root);
 
     if let Err(e) = write_layout(&source) {
         return Outcome::Failed(format!("cannot write {}: {e}", layout_path().display()));
@@ -240,7 +258,7 @@ pub fn install(folder: &Path) -> Outcome {
     for path in &wanted {
         match copy_asset(&folder.join(path), path) {
             Ok(()) => copied += 1,
-            // Not fatal, and not silent: the image renders a placeholder and
+            // Not fatal, and not silent: the node renders a placeholder and
             // settings offers Locate… for it.
             Err(e) => log::warn!("layout: cannot copy {path}: {e}"),
         }
@@ -320,7 +338,7 @@ pub fn describe(outcome: &Outcome) -> (String, Vec<String>) {
     match outcome {
         Outcome::Installed { assets: 0 } => ("Imported layout.kdl".to_string(), Vec::new()),
         Outcome::Installed { assets } => (
-            format!("Imported layout.kdl and {assets} image(s)"),
+            format!("Imported layout.kdl and {assets} file(s)"),
             Vec::new(),
         ),
         Outcome::Cancelled => (String::new(), Vec::new()),
