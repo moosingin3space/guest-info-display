@@ -42,6 +42,7 @@ const WIDGET_NAMES: &[&str] = &[
     "date",
     "now-playing",
     "up-next",
+    "now-playing-strip",
     "cover-art",
     "wifi-qr",
     "text",
@@ -590,6 +591,17 @@ impl<'a> Parser<'a> {
                     count,
                 }
             }
+            "now-playing-strip" => Widget::NowPlayingStrip {
+                direction: entries
+                    .take("direction")
+                    .and_then(|e| self.keyword(e, "direction", DIRECTIONS))
+                    .unwrap_or(Direction::Row),
+                cover_size: self.opt_number(&mut entries, "cover-size").unwrap_or(64.0),
+                show_next: self.opt_bool(&mut entries, "show-next").unwrap_or(true),
+                next_label: self
+                    .opt_string(&mut entries, "next-label")
+                    .unwrap_or_else(|| "Up next".to_string()),
+            },
             "cover-art" => Widget::CoverArt {
                 size: self.opt_number(&mut entries, "size").unwrap_or(220.0),
             },
@@ -1174,6 +1186,34 @@ mod tests {
         assert_eq!(parse_color("#fff"), None);
         assert_eq!(parse_color("ffffff"), None);
         assert_eq!(parse_color("#gggggg"), None);
+    }
+
+    #[test]
+    fn now_playing_strip_defaults_to_a_row_with_the_next_track() {
+        let p = ok(
+            "root {\n  now-playing-strip\n  now-playing-strip direction=\"column\" cover-size=96 show-next=#false next-label=\"Next\"\n}",
+        );
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        let root = p.root.expect("root");
+        let kids = children_of(&root);
+        assert_eq!(
+            kids[0].widget,
+            Widget::NowPlayingStrip {
+                direction: Direction::Row,
+                cover_size: 64.0,
+                show_next: true,
+                next_label: "Up next".to_string(),
+            }
+        );
+        assert_eq!(
+            kids[1].widget,
+            Widget::NowPlayingStrip {
+                direction: Direction::Column,
+                cover_size: 96.0,
+                show_next: false,
+                next_label: "Next".to_string(),
+            }
+        );
     }
 
     fn video_of(source: &str) -> (Video, Vec<Diagnostic>) {

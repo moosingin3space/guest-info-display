@@ -1,5 +1,6 @@
 // A Halloween screen: a looping, shuffled playlist of spooky clips takes most
-// of the panel, with the music and the Wi-Fi code in a narrow column beside it.
+// of the panel, with a strip naming the track and what plays next beneath it,
+// and the Wi-Fi code in a narrow column beside it.
 //
 // Put this file and a `clips/` folder in one folder and import it from
 // Settings → Layout; only the clips named below are copied in. The clips are
@@ -29,20 +30,21 @@ root {
     }
 
     row width="fill" flex=1 spacing=24 padding="0 28 16 28" {
-        video flex=1 height="fill" fit="cover" shuffle=#true {
-            item "clips/graveyard.mp4"
-            item "clips/bats.mp4"
-            item "clips/fog.mp4"
-            item "clips/pumpkins.mp4"
+        column flex=1 height="fill" spacing=16 {
+            video width="fill" flex=1 fit="cover" shuffle=#true {
+                item "clips/graveyard.mp4"
+                item "clips/bats.mp4"
+                item "clips/fog.mp4"
+                item "clips/pumpkins.mp4"
+            }
+            card width="fill" padding="12 16" when="playing" {
+                now-playing-strip width="fill" cover-size=56 next-label="Rising next"
+            }
         }
 
-        column width=300 height="fill" spacing=24 {
-            card width="fill" padding=20 when="playing" {
-                now-playing width="fill" cover-size=96 heading="Now haunting"
-            }
-            card width="fill" flex=1 padding=20 main-align="center" cross-align="center" {
-                wifi-qr heading="Join the coven" size=200
-            }
+        card width=300 height="fill" padding=20 spacing=20 cross-align="center" {
+            wifi-qr heading="Join the coven" size=200
+            now-playing-strip width="fill" direction="column" cover-size=96 show-next=#false when="playing"
         }
     }
 
