@@ -131,6 +131,21 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
             show_artist,
         } => now_playing(heading, *cover_size, *show_artist, &n.style, parent, ctx).into(),
         Widget::UpNext { heading, count } => up_next(heading, *count, &n.style, parent, ctx).into(),
+        Widget::NowPlayingStrip {
+            direction,
+            cover_size,
+            show_next,
+            next_label,
+        } => now_playing_strip(
+            *direction,
+            *cover_size,
+            *show_next,
+            next_label,
+            &n.style,
+            parent,
+            ctx,
+        )
+        .into(),
         Widget::CoverArt { size } => cover_art(*size, &n.style, parent, ctx).into(),
         Widget::WifiQr { heading, size } => wifi_qr(heading, *size, &n.style, parent, ctx).into(),
         Widget::Text { content } => {
@@ -269,6 +284,88 @@ fn now_playing(
         )
 }
 
+/// The compact track line. In a row the current track takes the space the
+/// next one leaves; in a column everything stacks, centred, for a sidebar.
+fn now_playing_strip(
+    direction: Direction,
+    cover_size: f32,
+    show_next: bool,
+    next_label: &str,
+    style: &Style,
+    parent: Direction,
+    ctx: &Ctx<'_>,
+) -> Rect {
+    let row = direction == Direction::Row;
+    let mut outer = rect().overflow(Overflow::Clip);
+    if row {
+        outer = outer.horizontal().content(Content::flex());
+    }
+    let outer = apply_box(
+        outer,
+        style,
+        parent,
+        BoxDefaults {
+            spacing: Some(16.),
+            cross_align: Some(Align::Center),
+            ..BoxDefaults::default()
+        },
+    );
+
+    if ctx.disconnected {
+        return outer.child(unavailable(ctx));
+    }
+
+    // A column has room for neither shrinking nor wrapping, so it centres.
+    let align = if row {
+        TextAlign::Start
+    } else {
+        TextAlign::Center
+    };
+    // Along a row each block takes a share; down a column, the full width.
+    let block_width = if row { Size::flex(1.) } else { Size::fill() };
+    let line = |l: Label| {
+        l.width(Size::fill())
+            .max_lines(1)
+            .text_overflow(TextOverflow::Ellipsis)
+            .text_align(align)
+    };
+
+    let (name, artist) = match &ctx.model.current_track {
+        Some(t) => (t.name.clone(), t.artists.clone()),
+        None => ("Nothing playing".to_string(), String::new()),
+    };
+    let current = rect()
+        .width(block_width.clone())
+        .spacing(4.)
+        .child(line(styled_label(style, ctx, 18.0, Weight::Bold, ctx.theme.text)).text(name))
+        .child(line(label().font_size(15.).color(rgba(ctx.theme.muted_text))).text(artist));
+
+    let mut outer = outer.child(cover_box(cover_size, ctx)).child(current);
+
+    let next = ctx.model.queue.first().filter(|t| t.is_resolved());
+    if show_next && let Some(next) = next {
+        outer = outer.child(
+            rect()
+                .width(block_width)
+                .spacing(4.)
+                .child(
+                    line(
+                        label()
+                            .font_size(13.)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .color(rgba(ctx.theme.muted_text)),
+                    )
+                    .text(next_label.to_string()),
+                )
+                .child(
+                    line(label().font_size(15.).color(rgba(ctx.theme.muted_text)))
+                        .text(format!("{} — {}", next.name, next.artists)),
+                ),
+        );
+    }
+    outer
+}
+
 fn cover_art(size: f32, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
     let outer = apply_box(rect(), style, parent, BoxDefaults::default());
     if ctx.disconnected {
@@ -304,6 +401,16 @@ fn cover_box(size: f32, ctx: &Ctx<'_>) -> Rect {
                 .aspect_ratio(AspectRatio::Max)
                 .image_cover(ImageCover::Center),
         ),
+        // Below this the words wrap into a jumble, so a small slot gets a note.
+        None if size < 80. => boxed
+            .center()
+            .background(rgba(ctx.theme.placeholder))
+            .child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .font_size(size * 0.45)
+                    .text("♪"),
+            ),
         None => boxed
             .center()
             .background(rgba(ctx.theme.placeholder))

@@ -141,6 +141,7 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `date` | `format` (default `%A, %B %-d`) |
 | `now-playing` | `heading`, `cover-size` (220), `show-artist` |
 | `up-next` | `heading`, `count` (5) |
+| `now-playing-strip` | A compact track line — small cover, title, artist and the next track. `direction="row"` (default) or `"column"`, `cover-size` (64), `show-next` (`#true`), `next-label` (`"Up next"`). Made for a strip above or below a `video`, or under the Wi-Fi code. |
 | `cover-art` | `size` — the artwork alone, with no text |
 | `wifi-qr` | `heading`, `size` (220) |
 | `text` | The string to show, as the first argument |
