@@ -1,6 +1,7 @@
 //! The Freya component behind a `video` node.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use freya::prelude::*;
@@ -8,17 +9,20 @@ use freya::prelude::*;
 use super::paint::Painter;
 use super::player::{Config, Player, Status};
 use crate::inhibitor::Inhibitor;
-use crate::layout::schema::Fit;
+use crate::layout::schema::Video;
 
 /// One mounted `video` node.
 ///
-/// Keyed on its config, so a layout edit that changes the playlist or its
-/// options remounts it with a fresh pipeline; an unrelated re-render of the
-/// layout leaves the clip playing where it was.
+/// Keyed on the node as the layout states it, so an edit to the playlist or
+/// its options remounts it with a fresh pipeline. Which of its files are on
+/// disk is *not* part of the key: when a reflection receives another clip, or
+/// a host locates a missing one, the running player is told and the clip on
+/// screen keeps playing.
 #[derive(Clone)]
 pub struct VideoView {
-    pub config: Config,
-    pub fit: Fit,
+    pub node: Video,
+    /// One entry per `node.items`: the file, or `None` while it is missing.
+    pub files: Vec<Option<PathBuf>>,
     pub inhibitor: Inhibitor,
     /// Placeholder text color, for when there is nothing to show.
     pub muted_text: (u8, u8, u8, u8),
@@ -26,16 +30,21 @@ pub struct VideoView {
 
 impl PartialEq for VideoView {
     fn eq(&self, other: &Self) -> bool {
-        self.config == other.config && self.fit == other.fit && self.muted_text == other.muted_text
+        self.node == other.node && self.files == other.files && self.muted_text == other.muted_text
     }
 }
 
 impl Component for VideoView {
     fn render(&self) -> impl IntoElement {
-        let fit = self.fit;
+        let fit = self.node.fit;
         let muted_text = self.muted_text;
         let player = use_hook({
-            let config = self.config.clone();
+            let config = Config {
+                items: self.files.clone(),
+                muted: self.node.muted,
+                looping: self.node.looping,
+                shuffle: self.node.shuffle,
+            };
             let inhibitor = self.inhibitor.clone();
             move || {
                 Rc::new(match super::available() {
@@ -69,11 +78,20 @@ impl Component for VideoView {
             }
         });
         let painter = use_hook(|| Rc::new(RefCell::new(Painter::default())));
+        // The file list the player last heard about.
+        let told = use_hook({
+            let files = self.files.clone();
+            move || Rc::new(RefCell::new(files))
+        });
 
         let player = match &*player {
             Ok(player) => player,
             Err(why) => return notice(why.clone(), muted_text),
         };
+        if *told.borrow() != self.files {
+            player.update_items(&self.files);
+            *told.borrow_mut() = self.files.clone();
+        }
         if let Status::Failed(why) = &*player.shared().status.lock().unwrap() {
             return notice(why.clone(), muted_text);
         }
@@ -91,7 +109,7 @@ impl Component for VideoView {
     }
 
     fn render_key(&self) -> DiffKey {
-        DiffKey::from(&(&self.config, self.fit))
+        DiffKey::from(&self.node)
     }
 }
 

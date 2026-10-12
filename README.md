@@ -199,8 +199,9 @@ instead, and `shuffle=#true` picks a fresh random order on every pass, never
 opening a pass on the clip that just ended.
 
 Paths follow the same rules as images, and missing files get the same
-**Locate…** treatment. A missing clip is dropped from the playlist rather than
-stopping it, so one forgotten file costs you that clip, not the screen. A file
+**Locate…** treatment. A missing clip is skipped rather than stopping the
+playlist, so one forgotten file costs you that clip, not the screen — and once
+you locate it, it joins the rotation without restarting what is playing. A file
 that will not decode is skipped the same way.
 
 **Sound.** Videos are muted by default — the music is the party's soundtrack.
@@ -237,7 +238,8 @@ paired reflections; each reflection downloads the clips it is missing, keeps
 them in its own data directory, and deletes any the current layout no longer
 uses. An interrupted download resumes where it stopped, and a clip shared by
 two layouts is fetched once. A reflection's video starts as soon as its first
-clip arrives and picks up the rest as they land. Playback is not synchronised
+clip arrives, and the rest join the rotation as they land without interrupting
+the clip on screen. Playback is not synchronised
 between screens: each one plays the playlist on its own clock.
 
 What does *not* mirror is anything local to a device: each screen shows its own
