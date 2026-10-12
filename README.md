@@ -240,8 +240,19 @@ them in its own data directory, and deletes any the current layout no longer
 uses. An interrupted download resumes where it stopped, and a clip shared by
 two layouts is fetched once. A reflection's video starts as soon as its first
 clip arrives, and the rest join the rotation as they land without interrupting
-the clip on screen. Playback is not synchronised
-between screens: each one plays the playlist on its own clock.
+the clip on screen.
+
+**Playback is synchronised.** Every screen tracks the primary's clock over the
+same connection that carries the layout, and the primary — which runs the
+playlist, shuffle included — announces each clip and the instant it started.
+Reflections play the same clip on the same frame, queue the clip the primary
+picked next, and nudge themselves back if they drift. A reflection that joins
+mid-clip locks straight on. One still waiting for a clip the primary is
+playing keeps showing what it has, and locks on at the next clip it can follow.
+The screens agree to within one refresh of the displays themselves; what a TV
+adds afterwards — its own processing delay — is beyond the app's reach, so set
+matching picture modes ("Game" mode usually minimises the delay) on TVs that
+can be seen together.
 
 What does *not* mirror is anything local to a device: each screen shows its own
 clock, its own role label, and — importantly — its own Wi-Fi QR code. Two

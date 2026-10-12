@@ -168,6 +168,10 @@ fn rebuild_backend(mut model: State<Model>) {
     // Reflections start disconnected and flip on the first snapshot.
     m.connected = matches!(m.role, persistence::Role::Primary);
     m.inhibitor.set(inhibitor::Source::Spotify, false);
+    video::sync::set_mode(match m.role {
+        persistence::Role::Primary => video::sync::Mode::Lead,
+        persistence::Role::Reflection => video::sync::Mode::Follow,
+    });
 
     let new_backend = match m.role {
         persistence::Role::Primary => {
@@ -223,6 +227,7 @@ fn publish_layout(m: &mut Model) {
     let assets =
         layout::assets::Assets::from_disk(&m.layout.active.doc.root, &layout::config_dir());
     m.assets = assets;
+    video::sync::clear();
 
     let source = m.layout.active.text.clone();
     let bundle: Vec<(String, Vec<u8>)> = m
@@ -259,6 +264,7 @@ async fn layout_listener(
                 // those rather than rendering the last party's photos.
                 let assets = layout::assets::Assets::expecting(&m.layout.active.doc.root);
                 m.assets = assets;
+                video::sync::clear();
                 if let Err(e) = m.db.set_mirrored_layout(Some(&source)) {
                     log::warn!("layout: cannot persist the mirrored layout: {e}");
                 }
@@ -599,6 +605,16 @@ fn app() -> impl IntoElement {
     use_ui_zoom();
 
     use_hook(move || {
+        // A primary's video players publish cues here; they go out to every
+        // reflection. Harmless on a reflection, whose players never publish.
+        let (cue_tx, cue_rx) = async_channel::bounded(32);
+        video::sync::set_outbox(cue_tx);
+        spawn(async move {
+            while let Ok(cue) = cue_rx.recv().await {
+                model.peek().multi_screen.broadcast_cue(cue);
+            }
+        });
+
         let (approvals_rx, discovered_rx) = {
             let m = model.peek();
             (m.multi_screen.approvals(), m.multi_screen.discovered())

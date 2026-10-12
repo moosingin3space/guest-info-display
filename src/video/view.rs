@@ -40,6 +40,8 @@ impl Component for VideoView {
         let muted_text = self.muted_text;
         let player = use_hook({
             let config = Config {
+                node: self.node.id,
+                paths: self.node.items.clone(),
                 items: self.files.clone(),
                 muted: self.node.muted,
                 looping: self.node.looping,

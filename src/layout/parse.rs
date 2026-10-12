@@ -131,6 +131,7 @@ pub fn parse(source: &str) -> Result<Parsed, Vec<Diagnostic>> {
     let mut p = Parser {
         source,
         diagnostics: Vec::new(),
+        videos: 0,
     };
 
     let mut theme = None;
@@ -253,6 +254,8 @@ impl<'a> Entries<'a> {
 struct Parser<'a> {
     source: &'a str,
     diagnostics: Vec<Diagnostic>,
+    /// `video` nodes seen so far, for their ids.
+    videos: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -703,7 +706,10 @@ impl<'a> Parser<'a> {
             return None;
         }
 
+        let id = self.videos;
+        self.videos += 1;
         Some(Video {
+            id,
             items,
             fit: entries
                 .take("fit")
@@ -1231,6 +1237,7 @@ mod tests {
         assert_eq!(
             v,
             Video {
+                id: 0,
                 items: vec!["ghosts.mp4".to_string()],
                 fit: Fit::Cover,
                 muted: true,
@@ -1256,6 +1263,21 @@ mod tests {
         assert_eq!(v.items, ["intro.mp4", "clips/bats.mkv", "clips/fog.webm"]);
         assert_eq!(v.fit, Fit::Contain);
         assert!(!v.muted && !v.looping && v.shuffle);
+    }
+
+    #[test]
+    fn video_ids_follow_document_order() {
+        let p = ok(r#"root { row { video "a.mp4" }; video "b.mp4"; video "c.mp4" }"#);
+        let mut ids = Vec::new();
+        fn collect(n: &Node, ids: &mut Vec<u32>) {
+            match &n.widget {
+                Widget::Video(v) => ids.push(v.id),
+                Widget::Container(c) => c.children.iter().for_each(|c| collect(c, ids)),
+                _ => {}
+            }
+        }
+        collect(&p.root.expect("root"), &mut ids);
+        assert_eq!(ids, [0, 1, 2]);
     }
 
     #[test]

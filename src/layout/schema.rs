@@ -214,6 +214,9 @@ pub enum Widget {
 /// A `video` node's playlist and playback options.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Video {
+    /// Position among the document's `video` nodes, from 0. Every screen
+    /// parses the same document, so this names the node in sync cues.
+    pub id: u32,
     /// Paths relative to the layout file's directory, validated like `image`
     /// paths. Never empty.
     pub items: Vec<String>,
