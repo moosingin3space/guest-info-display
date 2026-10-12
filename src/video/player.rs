@@ -39,7 +39,7 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 
 use super::playlist::Playlist;
-use super::sync::{self, Cue, Mode};
+use super::sync::{self, Cue, Mode, Readiness};
 use super::{FrameKind, clock, frame_kind};
 use crate::inhibitor::VideoLease;
 
@@ -50,6 +50,13 @@ const NUDGE_LIMIT_NS: i64 = 2_000_000_000;
 /// How far ahead of now a follower aims when it locks on, to cover opening,
 /// seeking and prerolling the clip.
 const LOCK_LEAD_NS: u64 = 400_000_000;
+/// How far ahead a primary schedules a start it has waited for, so the cue
+/// reaches every reflection before the moment it names.
+const START_LEAD_NS: u64 = 500_000_000;
+/// How long a primary holding its first clip also waits for paired reflections
+/// that have not connected yet. At a cold start the primary is usually up
+/// first; without this it would find nobody to wait for and start alone.
+const ARRIVAL_GRACE: Duration = Duration::from_secs(10);
 
 /// What a `video` node asked to play, resolved to files on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,12 +71,20 @@ pub struct Config {
     pub muted: bool,
     pub looping: bool,
     pub shuffle: bool,
+    /// On a primary: hold the first clip until the reflections have it.
+    pub wait: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     /// Opening the first clip; nothing on screen yet.
     Starting,
+    /// A primary holding its first clip on its first frame for `screens`
+    /// reflections, the slowest of which has downloaded `progress` of it.
+    Waiting {
+        screens: usize,
+        progress: Option<f32>,
+    },
     Playing,
     /// A non-looping playlist ran out. Its last frame stays up.
     Finished,
@@ -255,6 +270,11 @@ impl Player {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
+        let holding = sync.mode == Mode::Lead && config.wait;
+        if holding {
+            // Pick the next clip now, so the pending cue can name it.
+            *sync.planned.lock().unwrap() = playlist.lock().unwrap().advance();
+        }
         let watcher = BusWatcher {
             pipeline: playbin.downgrade(),
             shared: shared.clone(),
@@ -271,6 +291,8 @@ impl Player {
             aligned: 0,
             patience: 0,
             prepared: None,
+            holding: holding.then_some(first),
+            started: std::time::Instant::now(),
         };
         let bus = playbin.bus().ok_or("pipeline has no bus")?;
         thread::Builder::new()
@@ -278,8 +300,15 @@ impl Player {
             .spawn(move || watcher.run(bus))
             .map_err(|e| format!("cannot start the bus thread: {e}"))?;
 
+        // Holding for reflections: preroll to the first frame and wait there;
+        // the bus watcher starts it once they are ready.
+        let target = if holding {
+            gst::State::Paused
+        } else {
+            gst::State::Playing
+        };
         playbin
-            .set_state(gst::State::Playing)
+            .set_state(target)
             .map_err(|e| format!("cannot start playback: {e}"))?;
 
         Ok(Self {
@@ -409,6 +438,19 @@ fn video_sink(
                 query.add_allocation_meta::<gst_video::VideoMeta>(None);
                 true
             })
+            // A paused pipeline's first frame — a primary holding for its
+            // reflections, a reflection with the next clip loaded — is on
+            // screen while it waits.
+            .new_preroll({
+                let shared = shared.clone();
+                move |sink| {
+                    if let Ok(sample) = sink.pull_preroll() {
+                        *shared.frame.lock().unwrap() = Some(sample);
+                        let _ = shared.wake.try_send(());
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                }
+            })
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 if !produced_frame.swap(true, Ordering::Relaxed) {
@@ -431,13 +473,21 @@ fn video_sink(
                     if sync.mode == Mode::Lead
                         && let Some(pos0) = pos0
                     {
-                        let next = playlist.lock().unwrap().advance();
-                        *sync.planned.lock().unwrap() = next;
+                        // Already picked while holding for reflections, or
+                        // picked now.
+                        let next = {
+                            let mut planned = sync.planned.lock().unwrap();
+                            if planned.is_none() {
+                                *planned = playlist.lock().unwrap().advance();
+                            }
+                            *planned
+                        };
                         let cue = Cue {
                             node: sync.node,
                             current: sync.paths[item].clone(),
                             pos0,
                             next: next.map(|n| sync.paths[n].clone()),
+                            pending: false,
                         };
                         *sync.published.lock().unwrap() = Some(cue.clone());
                         sync::publish(cue);
@@ -501,6 +551,11 @@ struct BusWatcher {
     /// Follow: a clip loaded and paused on its first frame, waiting for the
     /// primary's cue to say when to play it.
     prepared: Option<usize>,
+    /// Lead: the first clip, held on its first frame until every subscribed
+    /// reflection has it loaded.
+    holding: Option<usize>,
+    /// When this player started, for [`ARRIVAL_GRACE`].
+    started: std::time::Instant,
 }
 
 impl BusWatcher {
@@ -525,6 +580,9 @@ impl BusWatcher {
             };
             if self.sync.mode == Mode::Follow {
                 self.follow(&pipeline);
+            }
+            if let Some(first) = self.holding {
+                self.hold(&pipeline, first);
             }
             let Some(msg) = msg else {
                 continue;
@@ -575,6 +633,86 @@ impl BusWatcher {
         }
     }
 
+    /// Lead: keep holding the first clip until no subscribed reflection is
+    /// still getting it ready, then schedule the start for everyone.
+    ///
+    /// The cue naming the start goes out *before* the start, half a second
+    /// ahead, so a reflection with the clip already loaded starts on the same
+    /// instant rather than catching up after it.
+    fn hold(&mut self, pipeline: &gst::Element, first: usize) {
+        let path = &self.sync.paths[first];
+        let next = *self.sync.planned.lock().unwrap();
+        let cue = |pending: bool, pos0: u64| Cue {
+            node: self.sync.node,
+            current: path.clone(),
+            pos0,
+            next: next.map(|n| self.sync.paths[n].clone()),
+            pending,
+        };
+
+        let (mut screens, progress) = sync::waiting_on(self.sync.node, path);
+        if self.started.elapsed() < ARRIVAL_GRACE {
+            screens += sync::absent();
+        }
+        if screens > 0 {
+            let waiting = Status::Waiting { screens, progress };
+            if *self.shared.status.lock().unwrap() != waiting {
+                // Re-announced on each change, so a reflection that subscribes
+                // mid-wait hears about it from the cue cache.
+                sync::publish(cue(true, 0));
+                self.shared.set_status(waiting);
+            }
+            return;
+        }
+
+        self.holding = None;
+        let start = clock::now() + START_LEAD_NS;
+        sync::publish(cue(false, start));
+        // Position 0 of the prerolled clip is running time 0: put it at `start`.
+        pipeline.set_start_time(gst::ClockTime::NONE);
+        pipeline.set_base_time(gst::ClockTime::from_nseconds(start));
+        log::info!(
+            "video: no reflection is still getting ready, starting {}",
+            self.describe(first)
+        );
+        let _ = pipeline.set_state(gst::State::Playing);
+    }
+
+    /// Follow: get a pending clip ready and say so, or say how far its
+    /// download has got. Asked again every pass until it is ready, which is
+    /// what keeps the primary's progress caption moving.
+    fn ready_for(&mut self, pipeline: &gst::Element, generation: u64, cue: &Cue) {
+        let uris = self.uris.clone();
+        let available = move |index: usize| uris.lock().unwrap()[index].is_some();
+        let index = self.sync.index_of(&cue.current).filter(|i| available(*i));
+        if let Some(index) = index
+            && self.prepared != Some(index)
+        {
+            self.prepare(pipeline, index);
+        }
+        let ready = index.is_some() && self.prepared == index;
+        sync::report(
+            self.sync.node,
+            Readiness {
+                path: cue.current.clone(),
+                ready,
+                progress: if ready {
+                    None
+                } else {
+                    sync::progress(&cue.current)
+                },
+            },
+        );
+        if ready {
+            self.seen_cue = generation;
+            *self.sync.next.lock().unwrap() = cue
+                .next
+                .as_deref()
+                .and_then(|path| self.sync.index_of(path))
+                .filter(|i| available(*i));
+        }
+    }
+
     /// Act on the newest cue for this node, once.
     fn follow(&mut self, pipeline: &gst::Element) {
         let Some((generation, cue)) = sync::latest(self.sync.node) else {
@@ -585,6 +723,10 @@ impl BusWatcher {
         }
         // No clock to line up against yet: try again on a later pass.
         if !clock::synced() {
+            return;
+        }
+        if cue.pending {
+            self.ready_for(pipeline, generation, &cue);
             return;
         }
         // A clip start older than one we already lined up with: stale.

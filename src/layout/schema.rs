@@ -229,6 +229,9 @@ pub struct Video {
     pub looping: bool,
     /// Play in a fresh random order on every pass through the list.
     pub shuffle: bool,
+    /// On a primary: hold the first clip on its first frame until every
+    /// connected reflection has it loaded too, then start them all together.
+    pub wait_for_reflections: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
