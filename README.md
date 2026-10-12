@@ -237,8 +237,11 @@ Videos travel separately from the rest, because they are big. The primary
 fingerprints each clip where it sits — no copy — and serves it only to its
 paired reflections; each reflection downloads the clips it is missing, keeps
 them in its own data directory, and deletes any the current layout no longer
-uses. An interrupted download resumes where it stopped, and a clip shared by
-two layouts is fetched once. A reflection's video starts as soon as its first
+uses. It fetches the clip the primary is playing first, then the one it will
+play next, then the rest — and if the primary moves on mid-download, it pauses
+that download for the clip now needed and resumes it afterwards. Until a clip
+arrives the screen shows how far along it is. An interrupted download resumes
+where it stopped, and a clip shared by two layouts is fetched once. A reflection's video starts as soon as its first
 clip arrives, and the rest join the rotation as they land without interrupting
 the clip on screen.
 

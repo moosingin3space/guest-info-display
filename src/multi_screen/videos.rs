@@ -20,6 +20,7 @@ use async_channel::Sender as AsyncSender;
 use iroh::{Endpoint, EndpointId};
 use iroh_blobs::api::TempTag;
 use iroh_blobs::api::blobs::{AddPathOptions, ExportMode, ExportOptions, ImportMode};
+use iroh_blobs::api::downloader::DownloadProgressItem;
 use iroh_blobs::provider::events::{
     AbortReason, ConnectMode, EventMask, EventSender, ProviderMessage,
 };
@@ -35,6 +36,8 @@ pub struct VideoRef {
     /// The layout-relative path the `video` node names.
     pub path: String,
     pub hash: Hash,
+    /// File size in bytes, so a reflection can say how far along it is.
+    pub size: u64,
 }
 
 /// `$XDG_DATA_HOME/xyz.mooshq.GuestInfoDisplay/<name>`.
@@ -94,6 +97,7 @@ impl Library {
                     refs.push(VideoRef {
                         path: path.clone(),
                         hash,
+                        size: self.known.get(file).map_or(0, |k| k.len),
                     });
                 }
                 Err(e) => log::warn!("multi_screen: cannot hash {}: {e}", file.display()),
@@ -212,7 +216,14 @@ impl Cache {
     }
 
     /// Make the cache hold exactly what `videos` names: drop the rest, hand
-    /// over what is already here, then fetch what is not, one at a time.
+    /// over what is already here, then fetch what is not, one at a time and
+    /// soonest-needed first.
+    ///
+    /// "Soonest" is the primary's say: a clip a node is playing comes before
+    /// one it plays next, which comes before the rest in layout order. It is
+    /// asked again before every fetch, and while one runs: if the primary
+    /// moves on to a clip that ranks higher than the one downloading, that
+    /// download stops — its data stays, to resume — and the urgent one starts.
     pub async fn sync(
         &self,
         endpoint: &Endpoint,
@@ -226,56 +237,157 @@ impl Cache {
         }
         self.prune(videos);
 
-        let mut fetch = Vec::new();
+        // One entry per file to fetch, with every layout path it serves.
+        let mut missing: Vec<(PathBuf, Vec<&VideoRef>)> = Vec::new();
         for video in videos {
             let file = self.file_for(video);
             if file.is_file() {
                 if !ready(layouts_tx, video, file).await {
                     return;
                 }
+            } else if let Some((_, refs)) = missing.iter_mut().find(|(f, _)| *f == file) {
+                refs.push(video);
             } else {
-                fetch.push(video);
+                missing.push((file, vec![video]));
             }
         }
+        if missing.is_empty() {
+            return;
+        }
 
-        for video in fetch {
-            let file = self.file_for(video);
-            // A later entry may share an earlier one's hash.
-            if !file.is_file()
-                && let Err(e) = self.download(endpoint, primary, video, &file).await
-            {
-                log::warn!("multi_screen: cannot fetch {}: {e}", video.path);
-                continue;
-            }
-            if !ready(layouts_tx, video, file).await {
-                return;
+        // The cues follow the layout down the stream; give them a moment to
+        // land so the first pick is informed rather than layout order.
+        if crate::video::sync::wanted_soon().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        while !missing.is_empty() {
+            let pick = most_urgent(&missing);
+            let (file, refs) = &missing[pick];
+            let video = refs[0];
+            let outcome = self
+                .download(endpoint, primary, video, refs, file, layouts_tx, || {
+                    // Pre-empt for anything that now outranks this file — by
+                    // both ranks as they stand *now*: the primary moving on is
+                    // exactly what demotes the file downloading.
+                    let best = most_urgent(&missing);
+                    best != pick && urgency(&missing[best].1) < urgency(&missing[pick].1)
+                })
+                .await;
+            match outcome {
+                Fetch::Done => {
+                    let (file, refs) = missing.remove(pick);
+                    for video in refs {
+                        if !ready(layouts_tx, video, file.clone()).await {
+                            return;
+                        }
+                    }
+                }
+                Fetch::Preempted => {
+                    log::info!(
+                        "multi_screen: pausing {} for a clip the primary needs sooner",
+                        video.path
+                    );
+                }
+                Fetch::Failed(e) => {
+                    log::warn!("multi_screen: cannot fetch {}: {e}", video.path);
+                    missing.remove(pick);
+                }
+                Fetch::Gone => return,
             }
         }
     }
 
+    /// Fetch one file, reporting progress for every path it serves, until it
+    /// is done or `preempt` says something more urgent has come up.
+    #[allow(clippy::too_many_arguments)]
     async fn download(
         &self,
         endpoint: &Endpoint,
         primary: EndpointId,
         video: &VideoRef,
+        refs: &[&VideoRef],
         target: &Path,
-    ) -> Result<(), String> {
+        layouts_tx: &AsyncSender<LayoutUpdate>,
+        preempt: impl Fn() -> bool,
+    ) -> Fetch {
         let incoming = self.incoming_for(&video.hash);
-        let store = FsStore::load(&incoming)
-            .await
-            .map_err(|e| format!("cannot open {}: {e}", incoming.display()))?;
+        let store = match FsStore::load(&incoming).await {
+            Ok(store) => store,
+            Err(e) => return Fetch::Failed(format!("cannot open {}: {e}", incoming.display())),
+        };
         let started = std::time::Instant::now();
         log::info!("multi_screen: fetching {} from the primary", video.path);
 
-        let result = async {
-            store
+        // Say it has started, so the screen shows a download rather than
+        // "waiting" until the first progress report.
+        for r in refs {
+            let update = LayoutUpdate::VideoProgress {
+                path: r.path.clone(),
+                received: 0,
+                total: r.size,
+            };
+            if layouts_tx.send(update).await.is_err() {
+                let _ = store.shutdown().await;
+                return Fetch::Gone;
+            }
+        }
+
+        let transfer = async {
+            let mut stream = store
                 .downloader(endpoint)
                 .download(video.hash, vec![primary])
+                .stream()
                 .await
                 .map_err(|e| e.to_string())?;
+            let mut last_report = std::time::Instant::now() - PROGRESS_INTERVAL;
+            while let Some(item) = futures_util::StreamExt::next(&mut stream).await {
+                match item {
+                    // Counts what a resumed download already had, too.
+                    DownloadProgressItem::Progress(received)
+                        if last_report.elapsed() >= PROGRESS_INTERVAL =>
+                    {
+                        last_report = std::time::Instant::now();
+                        for r in refs {
+                            let update = LayoutUpdate::VideoProgress {
+                                path: r.path.clone(),
+                                received,
+                                total: r.size,
+                            };
+                            if layouts_tx.send(update).await.is_err() {
+                                return Err(GONE.to_string());
+                            }
+                        }
+                    }
+                    DownloadProgressItem::Error(e) => return Err(e.to_string()),
+                    DownloadProgressItem::DownloadError => {
+                        return Err("the primary could not send it".to_string());
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+        let watch = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if preempt() {
+                    return;
+                }
+            }
+        };
+
+        let fetched = tokio::select! {
+            result = transfer => Some(result),
+            () = watch => None,
+        };
+        let outcome = match fetched {
+            None => Fetch::Preempted,
+            Some(Err(e)) if e == GONE => Fetch::Gone,
+            Some(Err(e)) => Fetch::Failed(e),
             // Move rather than copy: the store's copy is about to be thrown
             // away with the rest of the incoming directory.
-            store
+            Some(Ok(())) => match store
                 .blobs()
                 .export_with_opts(ExportOptions {
                     hash: video.hash,
@@ -283,20 +395,25 @@ impl Cache {
                     target: target.to_path_buf(),
                 })
                 .await
-                .map_err(|e| e.to_string())
-        }
-        .await;
+            {
+                Ok(_) => Fetch::Done,
+                Err(e) => Fetch::Failed(e.to_string()),
+            },
+        };
 
+        // Shut down cleanly whatever happened, so a paused download's data is
+        // there to resume from.
         let _ = store.shutdown().await;
         drop(store);
-        result?;
-        let _ = std::fs::remove_dir_all(&incoming);
-        log::info!(
-            "multi_screen: fetched {} in {:.1}s",
-            video.path,
-            started.elapsed().as_secs_f32()
-        );
-        Ok(())
+        if matches!(outcome, Fetch::Done) {
+            let _ = std::fs::remove_dir_all(&incoming);
+            log::info!(
+                "multi_screen: fetched {} in {:.1}s",
+                video.path,
+                started.elapsed().as_secs_f32()
+            );
+        }
+        outcome
     }
 
     /// Delete cached files and partial downloads the layout no longer names.
@@ -326,6 +443,40 @@ impl Cache {
         remove(&self.dir, &files, false);
         remove(&self.dir.join(".incoming"), &incoming, true);
     }
+}
+
+/// How often a download reports progress to the UI.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// The UI has gone away; nobody is waiting for anything.
+const GONE: &str = "the UI has gone away";
+
+enum Fetch {
+    Done,
+    /// Stopped for something more urgent; its data stays, to resume.
+    Preempted,
+    Failed(String),
+    Gone,
+}
+
+/// How soon the primary needs a file: 0 if a node is playing one of its paths,
+/// 1 if one plays it next, 2 otherwise.
+fn urgency(refs: &[&VideoRef]) -> u8 {
+    let soon = crate::video::sync::wanted_soon();
+    refs.iter()
+        .filter_map(|r| {
+            soon.iter()
+                .find(|(_, p)| *p == r.path)
+                .map(|(rank, _)| *rank)
+        })
+        .min()
+        .unwrap_or(2)
+}
+
+/// The missing file to fetch next: most urgent, then earliest in the layout.
+fn most_urgent(missing: &[(PathBuf, Vec<&VideoRef>)]) -> usize {
+    (0..missing.len())
+        .min_by_key(|&i| urgency(&missing[i].1))
+        .unwrap_or(0)
 }
 
 /// Tell the UI a file is playable. `false` once the UI has gone away.
