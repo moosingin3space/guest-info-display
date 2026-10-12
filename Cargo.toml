@@ -50,6 +50,7 @@ skia-safe = { package = "freya-skia-safe", version = "=0.98.1", features = ["gl"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 vergen = "=10.0.3"
+iroh-blobs = "0.103.1"
 
 [dev-dependencies]
 postcard = { version = "1", features = ["alloc"] }

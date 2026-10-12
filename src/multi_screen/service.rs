@@ -93,6 +93,14 @@ async fn handle_subscribe(
         }
     };
 
+    let layout_videos = match shared.layout_videos.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("multi_screen: layout-video lock poisoned: {e}");
+            return;
+        }
+    };
+
     let layout_assets: Vec<(String, Vec<u8>)> = match shared.layout_assets.lock() {
         Ok(guard) => guard.clone(),
         Err(e) => {
@@ -121,7 +129,11 @@ async fn handle_subscribe(
     let tx = req.tx;
 
     if let Some(source) = layout {
-        if let Err(e) = tx.send(WireMessage::Layout { source }).await {
+        let layout = WireMessage::Layout {
+            source,
+            videos: layout_videos,
+        };
+        if let Err(e) = tx.send(layout).await {
             log::debug!("multi_screen: subscriber dropped during layout: {e}");
             return;
         }

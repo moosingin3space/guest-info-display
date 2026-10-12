@@ -155,6 +155,23 @@ impl Assets {
         self.bytes.iter()
     }
 
+    /// Every video we can play, by layout path, for the primary to publish.
+    pub fn video_files(&self) -> Vec<(String, PathBuf)> {
+        self.wanted_videos
+            .iter()
+            .filter_map(|p| self.videos.get(p).map(|f| (p.clone(), f.clone())))
+            .collect()
+    }
+
+    /// A video file the primary's copy has been fetched into. Ignored unless
+    /// the current document names it: a download from the layout before
+    /// can finish after the next one arrived.
+    pub fn insert_video(&mut self, path: String, file: PathBuf) {
+        if self.wanted_videos.contains(&path) {
+            self.videos.insert(path, file);
+        }
+    }
+
     /// Bytes that arrived from the primary.
     pub fn insert(&mut self, path: String, data: Bytes) {
         self.errors.remove(&path);
