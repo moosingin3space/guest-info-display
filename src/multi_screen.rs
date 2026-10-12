@@ -46,11 +46,12 @@ use crate::spotify::{self, SharedSpotifyState, SpotifyState};
 /// compatibility — keep this in sync with the spec's "service version" notion.
 ///
 /// `/2` added `WireMessage::Layout`; `/3` added `WireMessage::Asset`; `/4` gave
-/// `Layout` its video hashes. Postcard rejects an unknown discriminant, so an
+/// `Layout` its video hashes; `/5` added video cues and the `Time` request for
+/// synchronised playback. Postcard rejects an unknown discriminant, so an
 /// un-upgraded reflection cannot decode either; bumping the ALPN means it fails
 /// to connect at all and shows "Primary unavailable", which is a diagnosable
 /// failure rather than a mysterious one. Both ends must be updated together.
-pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/4";
+pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/5";
 
 /// Cross-runtime broadcast tunnel: GPUI thread pushes events synchronously,
 /// the multi-screen runtime drains them and fans them out to subscribers.
@@ -77,6 +78,8 @@ enum BroadcastEvent {
         assets: Vec<(String, Vec<u8>)>,
         videos: Vec<VideoRef>,
     },
+    /// A primary's player started a clip, or picked the one after it.
+    Cue(crate::video::sync::Cue),
 }
 
 /// Approval request surfaced to the GPUI side when an unknown peer calls
@@ -172,6 +175,9 @@ struct Shared {
     layout_assets: Mutex<Vec<(String, Vec<u8>)>>,
     /// Hashes of the files behind the `video` nodes of `last_layout`.
     layout_videos: Mutex<Vec<VideoRef>>,
+    /// The newest cue per `video` node of `last_layout`, so a reflection that
+    /// subscribes mid-clip can lock straight on.
+    video_cues: Mutex<HashMap<u32, crate::video::sync::Cue>>,
     /// Encoded JPEG/PNG bytes keyed by Spotify cover URL. Populated each time
     /// a primary fetches a cover; cleared on session reset.
     cover_cache: Mutex<HashMap<String, Vec<u8>>>,
@@ -186,6 +192,7 @@ impl Shared {
             last_layout: Mutex::new(None),
             layout_assets: Mutex::new(Vec::new()),
             layout_videos: Mutex::new(Vec::new()),
+            video_cues: Mutex::new(HashMap::new()),
             cover_cache: Mutex::new(HashMap::new()),
             inbound_trusted,
         })
@@ -252,6 +259,11 @@ impl MultiScreenHandle {
             assets,
             videos,
         });
+    }
+
+    /// Tell every reflection what a `video` node is playing.
+    pub fn broadcast_cue(&self, cue: crate::video::sync::Cue) {
+        let _ = self.broadcast_tx.try_send(BroadcastEvent::Cue(cue));
     }
 
     /// Replace the set of endpoints that the primary accepts `Subscribe`
@@ -580,6 +592,8 @@ async fn broadcast_loop(
     hash_tx: AsyncSender<BroadcastEvent>,
     shared: Arc<Shared>,
 ) {
+    // The document the UI last announced, to tell a new one from a re-publish.
+    let mut announced: Option<String> = None;
     while let Ok(event) = rx.recv().await {
         // A layout fans out into the document plus one message per image, so
         // every event produces a batch. Each subscriber takes the whole batch
@@ -597,6 +611,12 @@ async fn broadcast_loop(
                 }
                 vec![WireMessage::CoverArt { url, encoded }]
             }
+            BroadcastEvent::Cue(cue) => {
+                if let Ok(mut guard) = shared.video_cues.lock() {
+                    guard.insert(cue.node, cue.clone());
+                }
+                vec![WireMessage::VideoCue(cue)]
+            }
             BroadcastEvent::CoversCleared => {
                 if let Ok(mut guard) = shared.cover_cache.lock() {
                     guard.clear();
@@ -604,6 +624,18 @@ async fn broadcast_loop(
                 vec![WireMessage::CoversCleared]
             }
             layout @ BroadcastEvent::Layout { .. } => {
+                // Cues name a document's nodes, so a different document voids
+                // them — cleared here, as the UI announces it, because its
+                // players start (and cue) before its videos finish hashing.
+                // The channel keeps order, so this lands ahead of those cues.
+                if let BroadcastEvent::Layout { source, .. } = &layout
+                    && announced.as_deref() != Some(source.as_str())
+                {
+                    announced = Some(source.clone());
+                    if let Ok(mut guard) = shared.video_cues.lock() {
+                        guard.clear();
+                    }
+                }
                 // Off to be hashed; it comes back as `LayoutReady`.
                 let _ = hash_tx.send(layout).await;
                 continue;

@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 use super::{
     PendingApproval, Shared, Subscriber,
-    proto::{DisplayMessage, PairingResponse, WireMessage},
+    proto::{DisplayMessage, PairingResponse, TimeResponse, WireMessage},
 };
 
 pub async fn run(
@@ -27,6 +27,17 @@ pub async fn run(
             }
             DisplayMessage::Subscribe(req) => {
                 tokio::spawn(handle_subscribe(req, shared.clone()));
+            }
+            // Answered inline, not on a spawned task: the reply is a clock
+            // reading, and every microsecond before it is sent is error.
+            DisplayMessage::Time(req) => {
+                let trusted = shared
+                    .inbound_trusted
+                    .lock()
+                    .map(|t| t.contains(&req.inner.endpoint_id))
+                    .unwrap_or(false);
+                let clock_ns = trusted.then(crate::video::clock::now);
+                let _ = req.tx.send(TimeResponse { clock_ns }).await;
             }
         }
     }
@@ -109,6 +120,14 @@ async fn handle_subscribe(
         }
     };
 
+    let cues: Vec<crate::video::sync::Cue> = match shared.video_cues.lock() {
+        Ok(guard) => guard.values().cloned().collect(),
+        Err(e) => {
+            log::warn!("multi_screen: video-cue lock poisoned: {e}");
+            return;
+        }
+    };
+
     let snapshot = match shared.last_state.lock() {
         Ok(guard) => guard.clone(),
         Err(e) => {
@@ -143,6 +162,12 @@ async fn handle_subscribe(
         for (path, encoded) in layout_assets {
             if let Err(e) = tx.send(WireMessage::Asset { path, encoded }).await {
                 log::debug!("multi_screen: subscriber dropped during asset replay: {e}");
+                return;
+            }
+        }
+        for cue in cues {
+            if let Err(e) = tx.send(WireMessage::VideoCue(cue)).await {
+                log::debug!("multi_screen: subscriber dropped during cue replay: {e}");
                 return;
             }
         }

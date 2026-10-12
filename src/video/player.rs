@@ -9,13 +9,23 @@
 //! the current clip still has data queued, which is what makes the cut between
 //! clips — and a single clip looping onto itself — gapless.
 //!
-//! Gapless needs the next clip to carry the same kinds of stream as the one
-//! ending. With audio on, a cut from a clip with a soundtrack to one without
-//! leaves playbin3 waiting forever for audio that never comes, and a night of
-//! mixed clips will contain exactly that. So an unmuted playlist cuts between
-//! *different* files the slow way — let the clip end, then restart on the next
-//! — and keeps gapless for the safe cases: muted, or one file looping onto
-//! itself.
+//! Gapless is only used for a clip looping onto itself. A gapless cut to a
+//! *different* file stalls playbin3 without an error whenever the two differ
+//! enough — a codec change swaps the VA decoder, which opens a display the
+//! running postprocessor refuses to adopt; a soundtrack that disappears leaves
+//! it waiting for audio forever — and a night of mixed clips will contain
+//! exactly that. So a cut between files is a restart: let the clip end, then
+//! start the next one from NULL.
+//!
+//! ## Across screens
+//!
+//! On a primary the player *leads*: it runs on the shared clock and, at each
+//! clip's first frame, publishes a [`Cue`] saying which clip and when its
+//! position 0 was on screen. On a reflection it *follows*: it locks onto a
+//! cued clip by choosing its pipeline's base time so the same frame lands at
+//! the same instant, nudges the base time when a later cue shows it has
+//! drifted, and plays the clip the primary queued next. Until it can follow —
+//! no clock yet, or a cued clip it does not have — it plays on its own.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -29,14 +39,27 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 
 use super::playlist::Playlist;
-use super::{FrameKind, frame_kind};
+use super::sync::{self, Cue, Mode};
+use super::{FrameKind, clock, frame_kind};
 use crate::inhibitor::VideoLease;
+
+/// Drift a follower lets stand: well under a frame at 30 fps.
+const TOLERANCE_NS: i64 = 8_000_000;
+/// Drift a follower corrects by moving its base time; beyond this, it reloads.
+const NUDGE_LIMIT_NS: i64 = 2_000_000_000;
+/// How far ahead of now a follower aims when it locks on, to cover opening,
+/// seeking and prerolling the clip.
+const LOCK_LEAD_NS: u64 = 400_000_000;
 
 /// What a `video` node asked to play, resolved to files on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Config {
-    /// One entry per clip the layout names, in document order: the file, or
-    /// `None` while it is missing — on a reflection, still on its way.
+    /// The node's document-order id, which names it in cues.
+    pub node: u32,
+    /// The layout paths of its clips, which name them in cues.
+    pub paths: Vec<String>,
+    /// One entry per path: the file, or `None` while it is missing — on a
+    /// reflection, still on its way.
     pub items: Vec<Option<PathBuf>>,
     pub muted: bool,
     pub looping: bool,
@@ -74,6 +97,37 @@ impl Shared {
 
 /// File URIs by playlist index; `None` where the file is not here (yet).
 type Uris = Arc<Mutex<Vec<Option<String>>>>;
+
+/// The cross-screen half of a player's state.
+struct Sync {
+    node: u32,
+    paths: Vec<String>,
+    mode: Mode,
+    /// Lead: the cue last published.
+    published: Mutex<Option<Cue>>,
+    /// Lead: the clip already picked to follow this one. Picked as a clip
+    /// starts, not at its end, so the cue announcing the start can name it and
+    /// reflections have the whole clip's length to queue the same one.
+    planned: Mutex<Option<usize>>,
+    /// Follow: the pipeline runs on the shared clock with a base time chosen
+    /// from a cue, so its timings compare with the primary's.
+    locked: AtomicBool,
+    /// Follow: the clip the primary queued next, by our index.
+    next: Mutex<Option<usize>>,
+    /// Pipeline-clock time position 0 of the current clip was on screen,
+    /// measured from its first frame.
+    pos0: Mutex<Option<u64>>,
+    /// Bumped on every restart from NULL. A restarted clip opens with the same
+    /// segment as the last restarted one, so the segment alone cannot tell
+    /// two of them apart.
+    restarts: AtomicUsize,
+}
+
+impl Sync {
+    fn index_of(&self, path: &str) -> Option<usize> {
+        self.paths.iter().position(|p| p == path)
+    }
+}
 
 pub struct Player {
     pipeline: gst::Element,
@@ -125,16 +179,27 @@ impl Player {
             .ok_or("none of the clips are here yet")?;
         let first_uri = uris[first].clone().expect("advance picks available items");
         let uris: Uris = Arc::new(Mutex::new(uris));
-        // Which item is decoding, for naming the file in an error. Moves on
-        // STREAM_START, not at `about-to-finish`, because the old clip is
-        // still playing out when the next one is queued.
+        // The clip whose frames come next: set when a clip is queued, read at
+        // its first frame. `current` names the clip decoding, for errors, and
+        // moves on STREAM_START.
         let queued = Arc::new(AtomicUsize::new(first));
         let current = Arc::new(AtomicUsize::new(first));
         // Cleared at each STREAM_START; the first frame after proves the clip
         // decodes, which is what lets a broken file count as a failure.
         let produced_frame = Arc::new(AtomicBool::new(false));
+        let sync = Arc::new(Sync {
+            node: config.node,
+            paths: config.paths.clone(),
+            mode: sync::mode(),
+            published: Mutex::new(None),
+            planned: Mutex::new(None),
+            locked: AtomicBool::new(false),
+            next: Mutex::new(None),
+            pos0: Mutex::new(None),
+            restarts: AtomicUsize::new(0),
+        });
 
-        let video_sink = video_sink(&kind, &shared, &playlist, &produced_frame)?;
+        let video_sink = video_sink(&kind, &shared, &playlist, &queued, &produced_frame, &sync)?;
         let playbin = gst::ElementFactory::make("playbin3")
             .property("uri", &first_uri)
             .property("video-sink", &video_sink)
@@ -155,6 +220,13 @@ impl Player {
         {
             playbin.set_property("audio-sink", &sink);
         }
+        // A primary's pipelines run on the clock its reflections measure, not
+        // on whatever playbin would pick (the audio sink's, when unmuted).
+        if sync.mode == Mode::Lead
+            && let Some(pipeline) = playbin.downcast_ref::<gst::Pipeline>()
+        {
+            pipeline.use_clock(Some(&clock::current()));
+        }
 
         // The next clip, when it has to wait for this one's EOS rather than
         // being queued gaplessly.
@@ -165,11 +237,13 @@ impl Player {
             let queued = queued.clone();
             let current = current.clone();
             let after_eos = after_eos.clone();
-            let muted = config.muted;
+            let sync = sync.clone();
             playbin.connect("about-to-finish", false, move |values| {
                 let playbin = values[0].get::<gst::Element>().ok()?;
-                let next = playlist.lock().unwrap().advance()?;
-                if muted || next == current.load(Ordering::Relaxed) {
+                let next = pick_next(&sync, &playlist);
+                log::debug!("video: about-to-finish, next {next:?}");
+                let next = next?;
+                if next == current.load(Ordering::Relaxed) {
                     let uri = uris.lock().unwrap()[next].clone()?;
                     queued.store(next, Ordering::Relaxed);
                     playbin.set_property("uri", &uri);
@@ -192,6 +266,11 @@ impl Player {
             after_eos,
             produced_frame,
             lease,
+            sync,
+            seen_cue: 0,
+            aligned: 0,
+            patience: 0,
+            prepared: None,
         };
         let bus = playbin.bus().ok_or("pipeline has no bus")?;
         thread::Builder::new()
@@ -213,6 +292,15 @@ impl Player {
         })
     }
 
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
+    /// Fires whenever there is something new to paint.
+    pub fn wake(&self) -> async_channel::Receiver<()> {
+        self.wake.clone()
+    }
+
     /// Take a newer view of which clips are here, without interrupting the one
     /// on screen: an arrival joins the rotation at the next pick, and a clip
     /// that went away is passed over from then on.
@@ -224,15 +312,6 @@ impl Player {
             playlist.set_available(index, uri.is_some());
             uris[index] = uri;
         }
-    }
-
-    pub fn shared(&self) -> &Arc<Shared> {
-        &self.shared
-    }
-
-    /// Fires whenever there is something new to paint.
-    pub fn wake(&self) -> async_channel::Receiver<()> {
-        self.wake.clone()
     }
 
     /// Tear the pipeline down. Idempotent; also runs on drop.
@@ -250,12 +329,46 @@ impl Drop for Player {
     }
 }
 
+/// The clip to queue after this one. A locked follower takes the primary's
+/// pick when it has it. Without one — the cue naming it can land a moment
+/// after this is asked — it guesses from its own rotation and stays locked:
+/// for a clip looping onto itself the guess is right, and the cue for the
+/// clip the primary did start puts a wrong guess right.
+fn pick_next(sync: &Sync, playlist: &Mutex<Playlist>) -> Option<usize> {
+    if sync.mode == Mode::Lead
+        && let Some(planned) = sync.planned.lock().unwrap().take()
+    {
+        return Some(planned);
+    }
+    if sync.mode == Mode::Follow
+        && sync.locked.load(Ordering::Relaxed)
+        && let Some(next) = sync.next.lock().unwrap().take()
+    {
+        return Some(next);
+    }
+    playlist.lock().unwrap().advance()
+}
+
+/// Clock time at which position 0 of the sample's clip is on screen:
+/// `base + running(pts) - position(pts)`. No latency term: GStreamer only
+/// configures one for live sources, and a file plays with none.
+fn pos0_of(sink: &gst_app::AppSink, sample: &gst::Sample) -> Option<u64> {
+    let base = sink.base_time()?;
+    let pts = sample.buffer()?.pts()?;
+    let segment = sample.segment()?.downcast_ref::<gst::ClockTime>()?;
+    let running = segment.to_running_time(pts)?;
+    let position = segment.to_stream_time(pts)?;
+    (base + running).nseconds().checked_sub(position.nseconds())
+}
+
 /// The appsink branch for `kind`, with its frame callback installed.
 fn video_sink(
     kind: &FrameKind,
     shared: &Arc<Shared>,
     playlist: &Arc<Mutex<Playlist>>,
+    queued: &Arc<AtomicUsize>,
     produced_frame: &Arc<AtomicBool>,
+    sync: &Arc<Sync>,
 ) -> Result<gst::Element, String> {
     let description = match kind {
         // vapostproc converts to packed RGB on the GPU's video engine and
@@ -277,7 +390,16 @@ fn video_sink(
 
     let shared = shared.clone();
     let playlist = playlist.clone();
+    let queued = queued.clone();
     let produced_frame = produced_frame.clone();
+    let sync = sync.clone();
+    // The segment the last clip start was seen in, with the restart count. A
+    // new clip, a loop of the same clip and a seek each bring a new segment,
+    // and a restart a new count. Not keyed on the queued clip: the next clip
+    // is queued while the old one's last frames are still arriving, so the
+    // queued clip only names a segment's clip at the moment that segment
+    // begins.
+    let mut last_start: Option<(usize, Option<gst::ClockTime>, Option<gst::ClockTime>)> = None;
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             // vapostproc refuses to export DMA-BUFs unless downstream takes
@@ -289,7 +411,6 @@ fn video_sink(
             })
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                *shared.frame.lock().unwrap() = Some(sample);
                 if !produced_frame.swap(true, Ordering::Relaxed) {
                     playlist.lock().unwrap().played();
                     let mut status = shared.status.lock().unwrap();
@@ -297,6 +418,33 @@ fn video_sink(
                         *status = Status::Playing;
                     }
                 }
+
+                let key = sample
+                    .segment()
+                    .and_then(|s| s.downcast_ref::<gst::ClockTime>().cloned())
+                    .map(|s| (sync.restarts.load(Ordering::Relaxed), s.base(), s.start()));
+                if key.is_some() && key != last_start {
+                    last_start = key;
+                    let item = queued.load(Ordering::Relaxed);
+                    let pos0 = pos0_of(sink, &sample);
+                    *sync.pos0.lock().unwrap() = pos0;
+                    if sync.mode == Mode::Lead
+                        && let Some(pos0) = pos0
+                    {
+                        let next = playlist.lock().unwrap().advance();
+                        *sync.planned.lock().unwrap() = next;
+                        let cue = Cue {
+                            node: sync.node,
+                            current: sync.paths[item].clone(),
+                            pos0,
+                            next: next.map(|n| sync.paths[n].clone()),
+                        };
+                        *sync.published.lock().unwrap() = Some(cue.clone());
+                        sync::publish(cue);
+                    }
+                }
+
+                *shared.frame.lock().unwrap() = Some(sample);
                 let _ = shared.wake.try_send(());
                 Ok(gst::FlowSuccess::Ok)
             })
@@ -327,8 +475,8 @@ fn audio_sink() -> Option<gst::Element> {
 }
 
 /// Follows the pipeline's bus on its own thread: errors skip to the next clip,
-/// end-of-stream finishes the playlist, and the inhibit lease tracks whether
-/// anything is actually playing.
+/// end-of-stream finishes the playlist, the inhibit lease tracks whether
+/// anything is actually playing, and — on a reflection — cues are acted on.
 struct BusWatcher {
     pipeline: gst::glib::WeakRef<gst::Element>,
     shared: Arc<Shared>,
@@ -340,6 +488,19 @@ struct BusWatcher {
     after_eos: Arc<Mutex<Option<usize>>>,
     produced_frame: Arc<AtomicBool>,
     lease: VideoLease,
+    sync: Arc<Sync>,
+    /// Arrival counter of the last cue acted on.
+    seen_cue: u64,
+    /// `pos0` of the clip start we last lined up with. A cue repeating it only
+    /// adds the clip after; an older one is stale.
+    aligned: u64,
+    /// Passes a large drift has been given to resolve on its own: at a clip
+    /// boundary, our first frame of the new clip may be a moment behind the
+    /// cue for it.
+    patience: u32,
+    /// Follow: a clip loaded and paused on its first frame, waiting for the
+    /// primary's cue to say when to play it.
+    prepared: Option<usize>,
 }
 
 impl BusWatcher {
@@ -353,15 +514,20 @@ impl BusWatcher {
         }
     }
 
-    fn run(self, bus: gst::Bus) {
+    fn run(mut self, bus: gst::Bus) {
         // Polled rather than blocking forever: a pipeline set to NULL flushes
         // its bus, so a shutdown message could never be relied on to arrive.
+        // The timeout also paces how soon a follower sees a new cue.
         while !self.stop.load(Ordering::Relaxed) {
-            let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(200)) else {
-                continue;
-            };
+            let msg = bus.timed_pop(gst::ClockTime::from_mseconds(100));
             let Some(pipeline) = self.pipeline.upgrade() else {
                 break;
+            };
+            if self.sync.mode == Mode::Follow {
+                self.follow(&pipeline);
+            }
+            let Some(msg) = msg else {
+                continue;
             };
             match msg.view() {
                 gst::MessageView::StreamStart(_) => {
@@ -378,6 +544,15 @@ impl BusWatcher {
                 gst::MessageView::Eos(_) => {
                     let next = self.after_eos.lock().unwrap().take();
                     match next {
+                        // A locked follower never starts a clip on its own
+                        // clock: it loads the primary's next one, paused on its
+                        // first frame, and plays it when the cue says when.
+                        _ if self.sync.locked.load(Ordering::Relaxed) => {
+                            let planned = next.or_else(|| self.sync.next.lock().unwrap().take());
+                            if let Some(next) = planned {
+                                self.prepare(&pipeline, next);
+                            }
+                        }
                         Some(next) => self.restart_on(&pipeline, next),
                         None => {
                             self.lease.set(false);
@@ -392,11 +567,198 @@ impl BusWatcher {
                         err.error(),
                         err.debug().unwrap_or_default()
                     );
+                    self.sync.locked.store(false, Ordering::Relaxed);
                     self.skip_past_failure(&pipeline, &file, &err.error().to_string());
                 }
                 _ => {}
             }
         }
+    }
+
+    /// Act on the newest cue for this node, once.
+    fn follow(&mut self, pipeline: &gst::Element) {
+        let Some((generation, cue)) = sync::latest(self.sync.node) else {
+            return;
+        };
+        if generation == self.seen_cue {
+            return;
+        }
+        // No clock to line up against yet: try again on a later pass.
+        if !clock::synced() {
+            return;
+        }
+        // A clip start older than one we already lined up with: stale.
+        if cue.pos0 < self.aligned {
+            self.seen_cue = generation;
+            return;
+        }
+
+        let available = |index: usize| self.uris.lock().unwrap()[index].is_some();
+        *self.sync.next.lock().unwrap() = cue
+            .next
+            .as_deref()
+            .and_then(|path| self.sync.index_of(path))
+            .filter(|i| available(*i));
+        // The same clip start again, now naming the clip after: noted above.
+        if cue.pos0 == self.aligned {
+            self.seen_cue = generation;
+            return;
+        }
+
+        let Some(index) = self.sync.index_of(&cue.current).filter(|i| available(*i)) else {
+            // Not here yet: keep playing what we have, and look again on the
+            // next pass — the file may land while this clip is still on.
+            return;
+        };
+
+        // Already loaded and waiting at position 0: play it on the cue.
+        if self.prepared == Some(index) {
+            self.done_with(generation, cue.pos0);
+            self.play_prepared(pipeline, cue.pos0, index);
+            return;
+        }
+
+        let playing = self.queued.load(Ordering::Relaxed) == index;
+        let measured = *self.sync.pos0.lock().unwrap();
+        if let (true, true, Some(pos0)) =
+            (self.sync.locked.load(Ordering::Relaxed), playing, measured)
+        {
+            let drift = pos0 as i64 - cue.pos0 as i64;
+            if drift.abs() <= TOLERANCE_NS {
+                self.done_with(generation, cue.pos0);
+                return;
+            }
+            if drift.abs() < NUDGE_LIMIT_NS {
+                log::debug!(
+                    "video: {:.1} ms off the primary, nudging",
+                    drift as f64 / 1e6
+                );
+                shift_base_time(pipeline, drift);
+                *self.sync.pos0.lock().unwrap() = Some(cue.pos0);
+                self.done_with(generation, cue.pos0);
+                return;
+            }
+            // Probably our first frame of this clip is still on its way.
+            if self.patience < 10 {
+                self.patience += 1;
+                return;
+            }
+        }
+        self.done_with(generation, cue.pos0);
+        self.lock_on(pipeline, index, cue.pos0);
+    }
+
+    fn done_with(&mut self, generation: u64, pos0: u64) {
+        self.seen_cue = generation;
+        self.aligned = pos0;
+        self.patience = 0;
+    }
+
+    /// Load clip `index` paused on its first frame, on the shared clock, with
+    /// the base time ours to set. `None` if there is nothing to load.
+    fn load(&mut self, pipeline: &gst::Element, index: usize) -> Option<gst::Clock> {
+        if self.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        let uri = self.uris.lock().unwrap()[index].clone()?;
+        let bin = pipeline.downcast_ref::<gst::Pipeline>()?;
+        let clock = clock::current();
+        self.after_eos.lock().unwrap().take();
+        self.prepared = None;
+        // NULL, not READY: in READY the VA postprocessor keeps its display,
+        // the new clip's decoder opens another, and every frame then fails
+        // with an invalid surface — so the preroll below would never finish.
+        let _ = pipeline.set_state(gst::State::Null);
+        self.sync.restarts.fetch_add(1, Ordering::Relaxed);
+        self.queued.store(index, Ordering::Relaxed);
+        self.current.store(index, Ordering::Relaxed);
+        pipeline.set_property("uri", &uri);
+        bin.use_clock(Some(&clock));
+        // Ours to choose, not the pipeline's: it must not pick a fresh base
+        // time when it goes to PLAYING.
+        pipeline.set_start_time(gst::ClockTime::NONE);
+        let _ = pipeline.set_state(gst::State::Paused);
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        Some(clock)
+    }
+
+    /// Get the primary's next clip ready, so its cue can start it at once.
+    fn prepare(&mut self, pipeline: &gst::Element, index: usize) {
+        if self.load(pipeline, index).is_some() {
+            self.prepared = Some(index);
+        }
+    }
+
+    /// Play the prepared clip so its position 0 falls at primary time `pos0`.
+    /// Usually that is a moment ago — the cue is sent as the primary shows the
+    /// frame — and the few frames already due are dropped to catch up. Much
+    /// later than that, seeking is quicker.
+    fn play_prepared(&mut self, pipeline: &gst::Element, pos0: u64, index: usize) {
+        self.prepared = None;
+        let behind = clock::now().saturating_sub(pos0);
+        if behind > LOCK_LEAD_NS {
+            self.lock_on(pipeline, index, pos0);
+            return;
+        }
+        pipeline.set_base_time(gst::ClockTime::from_nseconds(pos0));
+        self.sync.locked.store(true, Ordering::Relaxed);
+        log::info!(
+            "video: started {} with the primary ({:.0} ms behind)",
+            self.describe(index),
+            behind as f64 / 1e6
+        );
+        let _ = pipeline.set_state(gst::State::Playing);
+    }
+
+    /// Load clip `index` on the shared clock so its position 0 falls at
+    /// primary time `pos0`: aim a little ahead of now, seek there, and pick
+    /// the base time that puts that position on screen at the right moment.
+    fn lock_on(&mut self, pipeline: &gst::Element, index: usize, pos0: u64) {
+        let t = std::time::Instant::now();
+        let Some(clock) = self.load(pipeline, index) else {
+            return;
+        };
+        log::debug!("video: loading took {:?}", t.elapsed());
+        let target = clock.time().nseconds() + LOCK_LEAD_NS;
+        let position = target.saturating_sub(pos0);
+        // A cue placing us past the clip's end is stale — the primary will
+        // have moved on. Play from the top and wait for a fresher one.
+        if let Some(duration) = pipeline.query_duration::<gst::ClockTime>()
+            && position >= duration.nseconds()
+        {
+            log::debug!(
+                "video: cue is {:.1}s past the clip's end, ignoring it",
+                (position - duration.nseconds()) as f64 / 1e9
+            );
+            pipeline.set_start_time(gst::ClockTime::ZERO);
+            self.sync.locked.store(false, Ordering::Relaxed);
+            let _ = pipeline.set_state(gst::State::Playing);
+            return;
+        }
+        if position > 0 {
+            let t = std::time::Instant::now();
+            let _ = pipeline.seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::ClockTime::from_nseconds(position),
+            );
+            let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+            log::debug!("video: seek took {:?}", t.elapsed());
+        }
+        // After a flushing seek, running time 0 is at `position`.
+        pipeline.set_base_time(gst::ClockTime::from_nseconds(pos0 + position));
+        self.sync.locked.store(true, Ordering::Relaxed);
+        let late = clock.time().nseconds() as i64 - target as i64;
+        log::info!(
+            "video: locked onto the primary at {:.2}s into {} ({})",
+            position as f64 / 1e9,
+            self.describe(index),
+            if late > 0 {
+                format!("{:.0} ms late, dropping to catch up", late as f64 / 1e6)
+            } else {
+                format!("{:.0} ms to spare", -late as f64 / 1e6)
+            }
+        );
+        let _ = pipeline.set_state(gst::State::Playing);
     }
 
     /// An errored pipeline stops, so restarting on the next clip is ours to
@@ -433,10 +795,33 @@ impl BusWatcher {
         let Some(uri) = self.uris.lock().unwrap()[next].clone() else {
             return;
         };
-        let _ = pipeline.set_state(gst::State::Ready);
+        // NULL for the same reason as in `lock_on`.
+        let _ = pipeline.set_state(gst::State::Null);
+        self.sync.restarts.fetch_add(1, Ordering::Relaxed);
         self.queued.store(next, Ordering::Relaxed);
         self.current.store(next, Ordering::Relaxed);
         pipeline.set_property("uri", &uri);
+        // Hand base-time selection back to the pipeline: a follower that was
+        // locked fixed it, and playing on from a stale one would drop every
+        // frame as late.
+        pipeline.set_start_time(gst::ClockTime::ZERO);
         let _ = pipeline.set_state(gst::State::Playing);
+    }
+}
+
+/// Move a playing pipeline's base time by `drift`, on every element: a bin
+/// does not hand a new base time to its children until its next state change,
+/// and the sinks are what wait on it. Frames that are now late get dropped;
+/// early ones wait.
+fn shift_base_time(pipeline: &gst::Element, drift: i64) {
+    let Some(base) = pipeline.base_time() else {
+        return;
+    };
+    let shifted = gst::ClockTime::from_nseconds((base.nseconds() as i64 - drift).max(0) as u64);
+    pipeline.set_base_time(shifted);
+    if let Some(bin) = pipeline.downcast_ref::<gst::Bin>() {
+        for element in bin.iterate_recurse().into_iter().flatten() {
+            element.set_base_time(shifted);
+        }
     }
 }
