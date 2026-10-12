@@ -35,7 +35,9 @@ use crate::inhibitor::VideoLease;
 /// What a `video` node asked to play, resolved to files on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Config {
-    pub items: Vec<PathBuf>,
+    /// One entry per clip the layout names, in document order: the file, or
+    /// `None` while it is missing — on a reflection, still on its way.
+    pub items: Vec<Option<PathBuf>>,
     pub muted: bool,
     pub looping: bool,
     pub shuffle: bool,
@@ -70,19 +72,37 @@ impl Shared {
     }
 }
 
+/// File URIs by playlist index; `None` where the file is not here (yet).
+type Uris = Arc<Mutex<Vec<Option<String>>>>;
+
 pub struct Player {
     pipeline: gst::Element,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     wake: async_channel::Receiver<()>,
+    uris: Uris,
+    playlist: Arc<Mutex<Playlist>>,
+}
+
+fn to_uris(items: &[Option<PathBuf>]) -> Vec<Option<String>> {
+    items
+        .iter()
+        .map(|item| {
+            let path = item.as_ref()?;
+            match gst::glib::filename_to_uri(path, None) {
+                Ok(uri) => Some(uri.to_string()),
+                Err(e) => {
+                    log::warn!("video: {}: {e}", path.display());
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 impl Player {
     /// Build the pipeline and start the first clip.
     pub fn start(config: Config, lease: VideoLease) -> Result<Self, String> {
-        if config.items.is_empty() {
-            return Err("nothing to play".to_string());
-        }
         let kind = frame_kind();
         let (wake_tx, wake) = async_channel::bounded(1);
         let shared = Arc::new(Shared {
@@ -92,23 +112,19 @@ impl Player {
             wake: wake_tx,
         });
 
-        let uris: Arc<Vec<String>> = Arc::new(
-            config
-                .items
-                .iter()
-                .map(|p| {
-                    gst::glib::filename_to_uri(p, None)
-                        .map(|u| u.to_string())
-                        .map_err(|e| format!("{}: {e}", p.display()))
-                })
-                .collect::<Result<_, _>>()?,
-        );
+        let uris = to_uris(&config.items);
         let playlist = Arc::new(Mutex::new(Playlist::new(
-            uris.len(),
+            uris.iter().map(Option::is_some).collect(),
             config.looping,
             config.shuffle,
         )));
-        let first = playlist.lock().unwrap().advance().expect("non-empty");
+        let first = playlist
+            .lock()
+            .unwrap()
+            .advance()
+            .ok_or("none of the clips are here yet")?;
+        let first_uri = uris[first].clone().expect("advance picks available items");
+        let uris: Uris = Arc::new(Mutex::new(uris));
         // Which item is decoding, for naming the file in an error. Moves on
         // STREAM_START, not at `about-to-finish`, because the old clip is
         // still playing out when the next one is queued.
@@ -120,7 +136,7 @@ impl Player {
 
         let video_sink = video_sink(&kind, &shared, &playlist, &produced_frame)?;
         let playbin = gst::ElementFactory::make("playbin3")
-            .property("uri", &uris[first])
+            .property("uri", &first_uri)
             .property("video-sink", &video_sink)
             .build()
             .map_err(|e| format!("playbin3: {e}"))?;
@@ -154,8 +170,9 @@ impl Player {
                 let playbin = values[0].get::<gst::Element>().ok()?;
                 let next = playlist.lock().unwrap().advance()?;
                 if muted || next == current.load(Ordering::Relaxed) {
+                    let uri = uris.lock().unwrap()[next].clone()?;
                     queued.store(next, Ordering::Relaxed);
-                    playbin.set_property("uri", &uris[next]);
+                    playbin.set_property("uri", &uri);
                 } else {
                     *after_eos.lock().unwrap() = Some(next);
                 }
@@ -168,9 +185,8 @@ impl Player {
             pipeline: playbin.downgrade(),
             shared: shared.clone(),
             stop: stop.clone(),
-            uris,
-            config_items: config.items.clone(),
-            playlist,
+            uris: uris.clone(),
+            playlist: playlist.clone(),
             queued,
             current,
             after_eos,
@@ -192,7 +208,22 @@ impl Player {
             shared,
             stop,
             wake,
+            uris,
+            playlist,
         })
+    }
+
+    /// Take a newer view of which clips are here, without interrupting the one
+    /// on screen: an arrival joins the rotation at the next pick, and a clip
+    /// that went away is passed over from then on.
+    pub fn update_items(&self, items: &[Option<PathBuf>]) {
+        let fresh = to_uris(items);
+        let mut uris = self.uris.lock().unwrap();
+        let mut playlist = self.playlist.lock().unwrap();
+        for (index, uri) in fresh.into_iter().enumerate().take(uris.len()) {
+            playlist.set_available(index, uri.is_some());
+            uris[index] = uri;
+        }
     }
 
     pub fn shared(&self) -> &Arc<Shared> {
@@ -302,8 +333,7 @@ struct BusWatcher {
     pipeline: gst::glib::WeakRef<gst::Element>,
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
-    uris: Arc<Vec<String>>,
-    config_items: Vec<PathBuf>,
+    uris: Uris,
     playlist: Arc<Mutex<Playlist>>,
     queued: Arc<AtomicUsize>,
     current: Arc<AtomicUsize>,
@@ -313,6 +343,16 @@ struct BusWatcher {
 }
 
 impl BusWatcher {
+    /// Item `index` as a human would know it.
+    fn describe(&self, index: usize) -> String {
+        match &self.uris.lock().unwrap()[index] {
+            Some(uri) => gst::glib::filename_from_uri(uri)
+                .map(|(path, _)| path.display().to_string())
+                .unwrap_or_else(|_| uri.clone()),
+            None => format!("clip {index}"),
+        }
+    }
+
     fn run(self, bus: gst::Bus) {
         // Polled rather than blocking forever: a pipeline set to NULL flushes
         // its bus, so a shutdown message could never be relied on to arrive.
@@ -328,7 +368,7 @@ impl BusWatcher {
                     let item = self.queued.load(Ordering::Relaxed);
                     self.current.store(item, Ordering::Relaxed);
                     self.produced_frame.store(false, Ordering::Relaxed);
-                    log::info!("video: playing {}", self.config_items[item].display());
+                    log::info!("video: playing {}", self.describe(item));
                 }
                 gst::MessageView::StateChanged(change)
                     if change.src() == Some(pipeline.upcast_ref()) =>
@@ -346,8 +386,7 @@ impl BusWatcher {
                     }
                 }
                 gst::MessageView::Error(err) => {
-                    let item = self.current.load(Ordering::Relaxed);
-                    let file = self.config_items[item].display().to_string();
+                    let file = self.describe(self.current.load(Ordering::Relaxed));
                     log::warn!(
                         "video: {file}: {} ({})",
                         err.error(),
@@ -391,10 +430,13 @@ impl BusWatcher {
         }
         // An error can leave a clip queued for after an EOS that never comes.
         self.after_eos.lock().unwrap().take();
+        let Some(uri) = self.uris.lock().unwrap()[next].clone() else {
+            return;
+        };
         let _ = pipeline.set_state(gst::State::Ready);
         self.queued.store(next, Ordering::Relaxed);
         self.current.store(next, Ordering::Relaxed);
-        pipeline.set_property("uri", &self.uris[next]);
+        pipeline.set_property("uri", &uri);
         let _ = pipeline.set_state(gst::State::Playing);
     }
 }

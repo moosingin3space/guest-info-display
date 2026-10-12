@@ -23,7 +23,6 @@ use std::sync::OnceLock;
 
 use gstreamer as gst;
 
-pub use player::Config;
 pub use view::VideoView;
 
 /// How decoded frames are handed to the painter.
