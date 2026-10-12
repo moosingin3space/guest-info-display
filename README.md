@@ -11,6 +11,7 @@ A sleek, modern Linux desktop dashboard designed for guest rooms, home offices, 
 - **Spotify Connect Dashboard**: Acts as a Spotify Connect target ("Guest Info Display"). Shows "Now Playing" metadata, live cover art fetching, and the upcoming track queue.
 - **Glassmorphism UI**: A beautiful, translucent interface with deep gradients, optimized for high-resolution displays and kiosks.
 - **Configurable Layouts**: The whole screen is described by a KDL file you can edit in any text editor. Reloads live, and mirrors to paired displays.
+- **Video Playlists**: Loop a clip or a whole playlist anywhere in a layout, muted or with sound, hardware-decoded so 4K plays smoothly on an integrated GPU.
 - **Offline-First Packaging**: Distributed as a Flatpak for cross-distro compatibility and security.
 
 ## Installation
@@ -44,11 +45,12 @@ or the `flatpak-cargo-generator` command from `org.flatpak.Builder`.
 ### Building from Source
 
 A plain `cargo build` works wherever the linker can find `libstdc++`, EGL/GL,
-Wayland and fontconfig development libraries.
+Wayland, fontconfig and GStreamer development libraries.
 
 ```bash
 # Install dependencies (Example for Fedora/RHEL)
-sudo dnf install libstdc++-devel mesa-libEGL-devel wayland-devel fontconfig-devel
+sudo dnf install libstdc++-devel mesa-libEGL-devel wayland-devel fontconfig-devel \
+    gstreamer1-devel gstreamer1-plugins-base-devel
 
 # Run the application
 cargo run
@@ -77,10 +79,10 @@ Open **Settings → Layout**. `Copy default to config` writes the built-in layou
 out as a starting point; `Import folder…` opens a chooser so you can point at a
 folder on a USB stick without ever learning where the config directory is.
 
-Put the `.kdl` and the images it references in one folder and pick that folder.
-The app reads the document first and copies in only the images it actually
-names, keeping any subdirectories — so a folder with a hundred holiday photos
-and a layout that uses two of them costs you two files, not a hundred. Exactly
+Put the `.kdl` and the images and videos it references in one folder and pick
+that folder. The app reads the document first and copies in only the files it
+actually names, keeping any subdirectories — so a folder with a hundred holiday
+photos and a layout that uses two of them costs you two files, not a hundred. Exactly
 one `.kdl` per folder: with none there is nothing to import, and with several
 the import is refused rather than guessing which party you meant.
 
@@ -97,7 +99,8 @@ in Settings with a line number. Smaller mistakes are narrower still: an unknown
 widget or property skips that one node and renders everything around it.
 
 Worked examples live in [`assets/examples/`](assets/examples/) — a photo-led
-wedding screen, a quiet guest-room panel, and an artwork-forward music screen.
+wedding screen, a quiet guest-room panel, an artwork-forward music screen, and a
+Halloween screen built around a looping video playlist.
 
 ### The shape of a document
 
@@ -142,6 +145,7 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `wifi-qr` | `heading`, `size` (220) |
 | `text` | The string to show, as the first argument |
 | `image` | Path as the first argument, `fit="cover"` or `"contain"` |
+| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`) |
 | `role-label` | This device's role and short id |
 | `settings-button` | `size` (24) |
 
@@ -178,6 +182,45 @@ failing the document, and Settings lists it with a **Locate…** button that ope
 a chooser and files your pick under the name the layout expects. That is the way
 to fix one image later without re-importing the whole folder.
 
+### Videos
+
+```kdl
+video flex=1 fit="cover" shuffle=#true {
+    item "clips/graveyard.mp4"
+    item "clips/bats.mkv"
+    item "clips/fog.webm"
+}
+```
+
+A `video` plays its files back to back. Give it paths as arguments
+(`video "ghosts.mp4"`), as `item` children, or both — arguments play first. By
+default it loops the whole list forever; `loop=#false` stops on the last frame
+instead, and `shuffle=#true` picks a fresh random order on every pass, never
+opening a pass on the clip that just ended.
+
+Paths follow the same rules as images, and missing files get the same
+**Locate…** treatment. A missing clip is dropped from the playlist rather than
+stopping it, so one forgotten file costs you that clip, not the screen. A file
+that will not decode is skipped the same way.
+
+**Sound.** Videos are muted by default — the music is the party's soundtrack.
+`muted=#false` plays the clip's audio as its own stream, labelled *Guest Info
+Display* in your system mixer (`pavucontrol`, GNOME Settings, `wpctl`), so you
+balance it against Spotify there rather than in the app. Muted clips skip
+decoding their audio entirely.
+
+**Hardware decoding.** On a machine with working VA-API — AMD and Intel GPUs,
+including integrated ones — frames are decoded and converted on the GPU and
+handed straight to the renderer without passing through the CPU, which is what
+makes 4K smooth on modest hardware. Anything else falls back to copying every
+frame through the CPU, which always works but costs many times the CPU — keep
+clips small on such machines. To use the zero-copy path the app runs Freya's
+OpenGL renderer; set `FREYA_RENDERER=vulkan` to opt out.
+
+A playing video keeps the screen from blanking, the same as playing music. A
+`video` hidden by `when=` stops, and starts its playlist over when it comes
+back.
+
 ### Multiple displays
 
 A **primary** owns the layout. Pair a **reflection** to it and the document is
@@ -202,6 +245,7 @@ file.
 - **[Rust](https://www.rust-lang.org/)**: Core application logic.
 - **[Freya](https://freyaui.dev/)**: GPU-accelerated UI rendering, on Skia and winit.
 - **[KDL](https://kdl.dev/)**: The layout document format.
+- **[GStreamer](https://gstreamer.freedesktop.org/)**: Video playback, hardware-decoded through VA-API.
 - **[iroh](https://www.iroh.computer/)**: Peer-to-peer mirroring between displays.
 - **[librespot](https://github.com/librespot-org/librespot)**: Spotify Connect integration.
 - **[SQLite](https://sqlite.org/)**: Local data persistence.

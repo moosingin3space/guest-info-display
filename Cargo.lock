@@ -3062,6 +3062,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cpal",
+ "fastrand",
  "freya",
  "freya-skia-bindings",
  "freya-skia-safe",

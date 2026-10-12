@@ -17,11 +17,12 @@ use freya::prelude::*;
 
 use super::schema::{
     Align, Background, Container, Direction, Fit, GradientDirection, LayoutDoc, Node, Padding,
-    Rgba, Sizing, Style, TextAlign as SchemaAlign, Theme, Weight, When, Widget,
+    Rgba, Sizing, Style, TextAlign as SchemaAlign, Theme, Video, Weight, When, Widget,
 };
 use crate::Model;
 use crate::persistence::Role;
 use crate::qr_code;
+use crate::video;
 
 static SETTINGS_ICON: &[u8] = include_bytes!("../../assets/settings.svg");
 
@@ -135,9 +136,8 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
                 .text(content.clone())
                 .into()
         }
-        // Asset mirroring is a later ticket; until then an `image` node is an
-        // honest placeholder rather than a missing element.
         Widget::Image { path, fit } => image(path, *fit, &n.style, parent, ctx).into(),
+        Widget::Video(v) => video_node(v, &n.style, parent, ctx).into(),
         Widget::RoleLabel => role_label(&n.style, parent, ctx).into(),
         Widget::SettingsButton { size } => settings_button(*size, ctx).into(),
     };
@@ -463,6 +463,57 @@ fn image(path: &str, fit: Fit, style: &Style, parent: Direction, ctx: &Ctx<'_>) 
             .aspect_ratio(aspect)
             .image_cover(ImageCover::Center),
     )
+}
+
+/// A `video` node: its playlist playing, or a box naming the file it waits on.
+///
+/// Clips that are missing are left out of the playlist rather than failing it,
+/// so one forgotten file costs a host that clip, not the screen. The box only
+/// shows a name when *none* of the clips are here.
+fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
+    let base = rect().corner_radius(12.).overflow(Overflow::Clip);
+    let items: Vec<_> = v
+        .items
+        .iter()
+        .filter_map(|path| ctx.model.assets.video(path).map(|p| p.to_path_buf()))
+        .collect();
+
+    if items.is_empty() {
+        return apply_box(
+            base.background(rgba(ctx.theme.placeholder)),
+            style,
+            parent,
+            BoxDefaults {
+                main_align: Some(Align::Center),
+                cross_align: Some(Align::Center),
+                ..BoxDefaults::default()
+            },
+        )
+        .child(
+            label()
+                .color(rgba(ctx.theme.muted_text))
+                .text(v.items[0].clone()),
+        );
+    }
+
+    // Black behind the frame, so `contain` letterboxes like a screen would.
+    apply_box(
+        base.background((0, 0, 0)),
+        style,
+        parent,
+        BoxDefaults::default(),
+    )
+    .child(video::VideoView {
+        config: video::Config {
+            items,
+            muted: v.muted,
+            looping: v.looping,
+            shuffle: v.shuffle,
+        },
+        fit: v.fit,
+        inhibitor: ctx.model.inhibitor.clone(),
+        muted_text: rgba(ctx.theme.muted_text),
+    })
 }
 
 fn role_label(style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
