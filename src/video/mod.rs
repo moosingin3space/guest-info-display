@@ -14,9 +14,11 @@
 //! - **Raster** — anything else: frames are converted to RGBA in system memory
 //!   and copied. Fine at 1080p, heavy at 4K, but it always works.
 
+pub mod clock;
 mod paint;
 mod player;
 mod playlist;
+pub mod sync;
 mod view;
 
 use std::sync::OnceLock;
