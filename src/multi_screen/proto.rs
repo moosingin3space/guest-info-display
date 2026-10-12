@@ -14,7 +14,9 @@ use irpc::channel::{mpsc, oneshot};
 use irpc::rpc_requests;
 use serde::{Deserialize, Serialize};
 
+use super::videos::VideoRef;
 use crate::spotify::SpotifyState;
+use crate::video::sync::{Cue, Readiness};
 
 #[rpc_requests(message = DisplayMessage, no_spans)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,6 +30,36 @@ pub enum DisplayProtocol {
     /// followed by every subsequent state change until the channel closes.
     #[rpc(tx = mpsc::Sender<WireMessage>)]
     Subscribe(SubscribeRequest),
+
+    /// One clock-sync round trip: the primary answers with its video clock's
+    /// current time, and the reflection times the trip on its own clock.
+    #[rpc(tx = oneshot::Sender<TimeResponse>)]
+    Time(TimeRequest),
+
+    /// A reflection's progress towards starting a pending clip — see
+    /// `crate::video::sync::Readiness`. Sent whenever it changes.
+    #[rpc(tx = oneshot::Sender<()>)]
+    Ready(ReadyReport),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyReport {
+    /// Checked against the paired set, like `Subscribe`.
+    pub endpoint_id: EndpointId,
+    pub node: u32,
+    pub readiness: Readiness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeRequest {
+    /// Checked against the paired set, like `Subscribe`.
+    pub endpoint_id: EndpointId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeResponse {
+    /// The primary's video clock, in nanoseconds. `None` to an unpaired peer.
+    pub clock_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +106,14 @@ pub enum WireMessage {
     /// implementation, one set of diagnostics, and a wire that does not change
     /// every time a widget is added. The primary only ever sends source it has
     /// already parsed, so a reflection failing to parse it means version skew.
-    Layout { source: String },
+    ///
+    /// `videos` names the content behind each `video` path. The files
+    /// themselves are too big for this stream; the reflection fetches them
+    /// over iroh-blobs by hash.
+    Layout {
+        source: String,
+        videos: Vec<VideoRef>,
+    },
 
     /// Encoded bytes behind one `image` node of the current layout.
     ///
@@ -87,6 +126,11 @@ pub enum WireMessage {
     /// every subscribe — reflections do not persist assets, so a cold boot
     /// shows placeholders until these arrive.
     Asset { path: String, encoded: Vec<u8> },
+
+    /// Which clip a `video` node is playing and when it started, on the
+    /// primary's clock; see `crate::video::sync`. The newest per node is
+    /// replayed on subscribe, after the layout it belongs to.
+    VideoCue(Cue),
 }
 
 #[cfg(test)]
@@ -120,12 +164,24 @@ mod tests {
             },
             WireMessage::CoversCleared,
             WireMessage::Layout {
-                source: "root { clock }".into(),
+                source: "root { video \"ghosts.mp4\" }".into(),
+                videos: vec![VideoRef {
+                    path: "ghosts.mp4".into(),
+                    hash: iroh_blobs::Hash::new(b"not really a video"),
+                    size: 18,
+                }],
             },
             WireMessage::Asset {
                 path: "ana.jpg".into(),
                 encoded: vec![0x89, 0x50, 0x4e, 0x47],
             },
+            WireMessage::VideoCue(Cue {
+                node: 0,
+                current: "ghosts.mp4".into(),
+                pos0: 123_456_789_000,
+                next: Some("bats.mp4".into()),
+                pending: false,
+            }),
         ];
 
         for original in cases {

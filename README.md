@@ -11,6 +11,7 @@ A sleek, modern Linux desktop dashboard designed for guest rooms, home offices, 
 - **Spotify Connect Dashboard**: Acts as a Spotify Connect target ("Guest Info Display"). Shows "Now Playing" metadata, live cover art fetching, and the upcoming track queue.
 - **Glassmorphism UI**: A beautiful, translucent interface with deep gradients, optimized for high-resolution displays and kiosks.
 - **Configurable Layouts**: The whole screen is described by a KDL file you can edit in any text editor. Reloads live, and mirrors to paired displays.
+- **Video Playlists**: Loop a clip or a whole playlist anywhere in a layout, muted or with sound, hardware-decoded so 4K plays smoothly on an integrated GPU.
 - **Offline-First Packaging**: Distributed as a Flatpak for cross-distro compatibility and security.
 
 ## Installation
@@ -44,11 +45,12 @@ or the `flatpak-cargo-generator` command from `org.flatpak.Builder`.
 ### Building from Source
 
 A plain `cargo build` works wherever the linker can find `libstdc++`, EGL/GL,
-Wayland and fontconfig development libraries.
+Wayland, fontconfig and GStreamer development libraries.
 
 ```bash
 # Install dependencies (Example for Fedora/RHEL)
-sudo dnf install libstdc++-devel mesa-libEGL-devel wayland-devel fontconfig-devel
+sudo dnf install libstdc++-devel mesa-libEGL-devel wayland-devel fontconfig-devel \
+    gstreamer1-devel gstreamer1-plugins-base-devel
 
 # Run the application
 cargo run
@@ -77,10 +79,10 @@ Open **Settings → Layout**. `Copy default to config` writes the built-in layou
 out as a starting point; `Import folder…` opens a chooser so you can point at a
 folder on a USB stick without ever learning where the config directory is.
 
-Put the `.kdl` and the images it references in one folder and pick that folder.
-The app reads the document first and copies in only the images it actually
-names, keeping any subdirectories — so a folder with a hundred holiday photos
-and a layout that uses two of them costs you two files, not a hundred. Exactly
+Put the `.kdl` and the images and videos it references in one folder and pick
+that folder. The app reads the document first and copies in only the files it
+actually names, keeping any subdirectories — so a folder with a hundred holiday
+photos and a layout that uses two of them costs you two files, not a hundred. Exactly
 one `.kdl` per folder: with none there is nothing to import, and with several
 the import is refused rather than guessing which party you meant.
 
@@ -97,7 +99,8 @@ in Settings with a line number. Smaller mistakes are narrower still: an unknown
 widget or property skips that one node and renders everything around it.
 
 Worked examples live in [`assets/examples/`](assets/examples/) — a photo-led
-wedding screen, a quiet guest-room panel, and an artwork-forward music screen.
+wedding screen, a quiet guest-room panel, an artwork-forward music screen, and a
+Halloween screen built around a looping video playlist.
 
 ### The shape of a document
 
@@ -138,10 +141,12 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `date` | `format` (default `%A, %B %-d`) |
 | `now-playing` | `heading`, `cover-size` (220), `show-artist` |
 | `up-next` | `heading`, `count` (5) |
+| `now-playing-strip` | A compact track line — small cover, title, artist and the next track. `direction="row"` (default) or `"column"`, `cover-size` (64), `show-next` (`#true`), `next-label` (`"Up next"`). Made for a strip above or below a `video`, or under the Wi-Fi code. |
 | `cover-art` | `size` — the artwork alone, with no text |
 | `wifi-qr` | `heading`, `size` (220) |
 | `text` | The string to show, as the first argument |
 | `image` | Path as the first argument, `fit="cover"` or `"contain"` |
+| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`), `wait-for-reflections` (`#false`) |
 | `role-label` | This device's role and short id |
 | `settings-button` | `size` (24) |
 
@@ -178,15 +183,89 @@ failing the document, and Settings lists it with a **Locate…** button that ope
 a chooser and files your pick under the name the layout expects. That is the way
 to fix one image later without re-importing the whole folder.
 
+### Videos
+
+```kdl
+video flex=1 fit="cover" shuffle=#true {
+    item "clips/graveyard.mp4"
+    item "clips/bats.mkv"
+    item "clips/fog.webm"
+}
+```
+
+A `video` plays its files back to back. Give it paths as arguments
+(`video "ghosts.mp4"`), as `item` children, or both — arguments play first. By
+default it loops the whole list forever; `loop=#false` stops on the last frame
+instead, and `shuffle=#true` picks a fresh random order on every pass, never
+opening a pass on the clip that just ended.
+
+Paths follow the same rules as images, and missing files get the same
+**Locate…** treatment. A missing clip is skipped rather than stopping the
+playlist, so one forgotten file costs you that clip, not the screen — and once
+you locate it, it joins the rotation without restarting what is playing. A file
+that will not decode is skipped the same way.
+
+**Sound.** Videos are muted by default — the music is the party's soundtrack.
+`muted=#false` plays the clip's audio as its own stream, labelled *Guest Info
+Display* in your system mixer (`pavucontrol`, GNOME Settings, `wpctl`), so you
+balance it against Spotify there rather than in the app. Like the music, a
+video's sound plays from the primary only: reflections always show it silent.
+Muted clips skip decoding their audio entirely.
+
+**Hardware decoding.** On a machine with working VA-API — AMD and Intel GPUs,
+including integrated ones — frames are decoded and converted on the GPU and
+handed straight to the renderer without passing through the CPU, which is what
+makes 4K smooth on modest hardware. Anything else falls back to copying every
+frame through the CPU, which always works but costs many times the CPU — keep
+clips small on such machines. To use the zero-copy path the app runs Freya's
+OpenGL renderer; set `FREYA_RENDERER=vulkan` to opt out.
+
+A playing video keeps the screen from blanking, the same as playing music. A
+`video` hidden by `when=` stops, and starts its playlist over when it comes
+back.
+
 ### Multiple displays
 
 A **primary** owns the layout. Pair a **reflection** to it and the document is
-pushed across, with its images, and re-pushed on every edit — so re-theming a
-party means editing one file on one machine.
+pushed across, with its images and videos, and re-pushed on every edit — so
+re-theming a party means editing one file on one machine.
 
 A reflection ignores its own `layout.kdl` entirely, and remembers the last one
 it was sent, so a display that reboots before its primary is up still comes
 back in the party's colours instead of flashing the built-in default.
+
+Videos travel separately from the rest, because they are big. The primary
+fingerprints each clip where it sits — no copy — and serves it only to its
+paired reflections; each reflection downloads the clips it is missing, keeps
+them in its own data directory, and deletes any the current layout no longer
+uses. It fetches the clip the primary is playing first, then the one it will
+play next, then the rest — and if the primary moves on mid-download, it pauses
+that download for the clip now needed and resumes it afterwards. Until a clip
+arrives the screen shows how far along it is. An interrupted download resumes
+where it stopped, and a clip shared by two layouts is fetched once. A reflection's video starts as soon as its first
+clip arrives, and the rest join the rotation as they land without interrupting
+the clip on screen.
+
+**Playback is synchronised.** Every screen tracks the primary's clock over the
+same connection that carries the layout, and the primary — which runs the
+playlist, shuffle included — announces each clip and the instant it started.
+Reflections play the same clip on the same frame, queue the clip the primary
+picked next, and nudge themselves back if they drift. A reflection that joins
+mid-clip locks straight on. One still waiting for a clip the primary is
+playing keeps showing what it has, and locks on at the next clip it can follow.
+The screens agree to within one refresh of the displays themselves; what a TV
+adds afterwards — its own processing delay — is beyond the app's reach, so set
+matching picture modes ("Game" mode usually minimises the delay) on TVs that
+can be seen together.
+
+**Starting together.** Give a `video` `wait-for-reflections=#true` and the
+primary holds its first clip on the first frame — captioned "Waiting for 1
+screen… 40%" — until every connected reflection has that clip downloaded and
+loaded, then starts them all on the same instant. It waits as long as that
+takes, but never for a screen that has disconnected, and only for the very
+first start: the rest of the playlist keeps downloading while it plays. At a
+cold start it also gives paired reflections that have not connected yet ten
+seconds to arrive.
 
 What does *not* mirror is anything local to a device: each screen shows its own
 clock, its own role label, and — importantly — its own Wi-Fi QR code. Two
@@ -202,6 +281,7 @@ file.
 - **[Rust](https://www.rust-lang.org/)**: Core application logic.
 - **[Freya](https://freyaui.dev/)**: GPU-accelerated UI rendering, on Skia and winit.
 - **[KDL](https://kdl.dev/)**: The layout document format.
+- **[GStreamer](https://gstreamer.freedesktop.org/)**: Video playback, hardware-decoded through VA-API.
 - **[iroh](https://www.iroh.computer/)**: Peer-to-peer mirroring between displays.
 - **[librespot](https://github.com/librespot-org/librespot)**: Spotify Connect integration.
 - **[SQLite](https://sqlite.org/)**: Local data persistence.

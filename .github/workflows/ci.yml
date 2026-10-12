@@ -42,7 +42,9 @@ jobs:
         uses: wolfi-dev/wolfi-act@7f6915e256697663d18940570e932e990e6adb93 # main
         with:
           # curl: freya-skia-bindings shells out to it to fetch the Skia prebuilt.
-          packages: rust,pkgconf,clang-22,openssl-dev,alsa-lib-dev,fontconfig-dev,freetype-dev,mesa-dev,wayland-dev,libstdc++-dev,curl
+          # gstreamer-dev, gst-plugins-base-dev: video playback (app, video and
+          # allocators libraries come from base).
+          packages: rust,pkgconf,clang-22,openssl-dev,alsa-lib-dev,fontconfig-dev,freetype-dev,mesa-dev,wayland-dev,libstdc++-dev,curl,gstreamer-dev,gst-plugins-base-dev
           command: |
             export CARGO_HOME=/work/.cargo-home
             cargo build --release

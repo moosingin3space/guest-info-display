@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 use super::{
     PendingApproval, Shared, Subscriber,
-    proto::{DisplayMessage, PairingResponse, WireMessage},
+    proto::{DisplayMessage, PairingResponse, TimeResponse, WireMessage},
 };
 
 pub async fn run(
@@ -27,6 +27,33 @@ pub async fn run(
             }
             DisplayMessage::Subscribe(req) => {
                 tokio::spawn(handle_subscribe(req, shared.clone()));
+            }
+            // Answered inline, not on a spawned task: the reply is a clock
+            // reading, and every microsecond before it is sent is error.
+            DisplayMessage::Time(req) => {
+                let trusted = shared
+                    .inbound_trusted
+                    .lock()
+                    .map(|t| t.contains(&req.inner.endpoint_id))
+                    .unwrap_or(false);
+                let clock_ns = trusted.then(crate::video::clock::now);
+                let _ = req.tx.send(TimeResponse { clock_ns }).await;
+            }
+            DisplayMessage::Ready(req) => {
+                let report = &req.inner;
+                let trusted = shared
+                    .inbound_trusted
+                    .lock()
+                    .map(|t| t.contains(&report.endpoint_id))
+                    .unwrap_or(false);
+                if trusted {
+                    crate::video::sync::set_readiness(
+                        report.endpoint_id.to_string(),
+                        report.node,
+                        report.readiness.clone(),
+                    );
+                }
+                let _ = req.tx.send(()).await;
             }
         }
     }
@@ -93,10 +120,26 @@ async fn handle_subscribe(
         }
     };
 
+    let layout_videos = match shared.layout_videos.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("multi_screen: layout-video lock poisoned: {e}");
+            return;
+        }
+    };
+
     let layout_assets: Vec<(String, Vec<u8>)> = match shared.layout_assets.lock() {
         Ok(guard) => guard.clone(),
         Err(e) => {
             log::warn!("multi_screen: layout-asset lock poisoned: {e}");
+            return;
+        }
+    };
+
+    let cues: Vec<crate::video::sync::Cue> = match shared.video_cues.lock() {
+        Ok(guard) => guard.values().cloned().collect(),
+        Err(e) => {
+            log::warn!("multi_screen: video-cue lock poisoned: {e}");
             return;
         }
     };
@@ -121,7 +164,11 @@ async fn handle_subscribe(
     let tx = req.tx;
 
     if let Some(source) = layout {
-        if let Err(e) = tx.send(WireMessage::Layout { source }).await {
+        let layout = WireMessage::Layout {
+            source,
+            videos: layout_videos,
+        };
+        if let Err(e) = tx.send(layout).await {
             log::debug!("multi_screen: subscriber dropped during layout: {e}");
             return;
         }
@@ -131,6 +178,12 @@ async fn handle_subscribe(
         for (path, encoded) in layout_assets {
             if let Err(e) = tx.send(WireMessage::Asset { path, encoded }).await {
                 log::debug!("multi_screen: subscriber dropped during asset replay: {e}");
+                return;
+            }
+        }
+        for cue in cues {
+            if let Err(e) = tx.send(WireMessage::VideoCue(cue)).await {
+                log::debug!("multi_screen: subscriber dropped during cue replay: {e}");
                 return;
             }
         }
@@ -147,10 +200,30 @@ async fn handle_subscribe(
         }
     }
 
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let watch = tx.clone();
     if let Ok(mut guard) = shared.subscribers.lock() {
         guard.push(Subscriber {
+            id,
             endpoint_id,
             sender: tx,
         });
     }
+
+    // Forget the subscription as soon as the reflection goes away. Sending to
+    // it would notice too, but only at the next broadcast — and a primary
+    // holding a clip for its reflections broadcasts next to nothing, so it
+    // would wait on a screen that is gone. By id, not endpoint: a reflection
+    // that reconnected quickly has a newer subscription to keep.
+    tokio::spawn(async move {
+        watch.closed().await;
+        if let Ok(mut guard) = shared.subscribers.lock() {
+            guard.retain(|s| s.id != id);
+        }
+        log::info!(
+            "multi_screen: reflection {} unsubscribed",
+            endpoint_id.fmt_short()
+        );
+    });
 }

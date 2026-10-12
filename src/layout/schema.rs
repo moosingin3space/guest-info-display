@@ -145,7 +145,7 @@ pub enum Direction {
     Row,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Fit {
     Cover,
     Contain,
@@ -179,6 +179,14 @@ pub enum Widget {
         heading: String,
         count: usize,
     },
+    /// A compact track line: small cover, title and artist, and optionally the
+    /// next track — for a strip beside a video or under the Wi-Fi code.
+    NowPlayingStrip {
+        direction: Direction,
+        cover_size: f32,
+        show_next: bool,
+        next_label: String,
+    },
     CoverArt {
         size: f32,
     },
@@ -195,10 +203,35 @@ pub enum Widget {
         path: String,
         fit: Fit,
     },
+    /// A playlist of video files, played back to back.
+    Video(Video),
     RoleLabel,
     SettingsButton {
         size: f32,
     },
+}
+
+/// A `video` node's playlist and playback options.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Video {
+    /// Position among the document's `video` nodes, from 0. Every screen
+    /// parses the same document, so this names the node in sync cues.
+    pub id: u32,
+    /// Paths relative to the layout file's directory, validated like `image`
+    /// paths. Never empty.
+    pub items: Vec<String>,
+    pub fit: Fit,
+    /// Muted skips decoding the audio track entirely; unmuted plays it as its
+    /// own audio stream, so the host mixes it against Spotify in the system
+    /// mixer rather than in this app.
+    pub muted: bool,
+    /// Start over after the last item rather than holding its final frame.
+    pub looping: bool,
+    /// Play in a fresh random order on every pass through the list.
+    pub shuffle: bool,
+    /// On a primary: hold the first clip on its first frame until every
+    /// connected reflection has it loaded too, then start them all together.
+    pub wait_for_reflections: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

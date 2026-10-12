@@ -10,10 +10,14 @@
 //! bytes it holds. A path with no bytes is a different thing on each side — a
 //! file the host forgot to import, or a file still in flight — and
 //! [`Assets::missing`] is what settings turns into a **Locate…** action.
+//!
+//! Videos are tracked here too, but by path, never by bytes: a night of clips
+//! runs to gigabytes, so a primary hands players the file on disk and the
+//! store only records whether it is there.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 
@@ -65,6 +69,12 @@ pub struct Assets {
     /// Why a wanted path produced no bytes. Only a primary fills this in — a
     /// reflection's absent asset is "not here yet", not an error.
     errors: HashMap<String, String>,
+    /// Paths named by `video` nodes, in document order, deduplicated.
+    wanted_videos: Vec<String>,
+    /// Where each wanted video can be read from, for those that can.
+    videos: HashMap<String, PathBuf>,
+    /// Bytes received and expected, for videos a reflection is downloading.
+    progress: HashMap<String, (u64, u64)>,
 }
 
 impl Assets {
@@ -75,6 +85,9 @@ impl Assets {
             wanted: image_paths(root),
             bytes: HashMap::new(),
             errors: HashMap::new(),
+            wanted_videos: video_paths(root),
+            videos: HashMap::new(),
+            progress: HashMap::new(),
         }
     }
 
@@ -100,10 +113,35 @@ impl Assets {
             }
         }
 
+        let wanted_videos = video_paths(root);
+        let mut videos = HashMap::new();
+        for path in &wanted_videos {
+            let full = dir.join(path);
+            match std::fs::metadata(&full) {
+                Ok(meta) if meta.is_file() => {
+                    videos.insert(path.clone(), full);
+                }
+                Ok(_) => {
+                    errors.insert(path.clone(), "not a file".to_string());
+                }
+                Err(e) => {
+                    let why = match e.kind() {
+                        std::io::ErrorKind::NotFound => "file not found".to_string(),
+                        _ => e.to_string(),
+                    };
+                    log::warn!("layout: {path}: {why}");
+                    errors.insert(path.clone(), why);
+                }
+            }
+        }
+
         Self {
             wanted,
             bytes,
             errors,
+            wanted_videos,
+            videos,
+            progress: HashMap::new(),
         }
     }
 
@@ -111,9 +149,50 @@ impl Assets {
         self.bytes.get(path)
     }
 
+    /// The file behind a `video` node's playlist entry, if we have it.
+    pub fn video(&self, path: &str) -> Option<&Path> {
+        self.videos.get(path).map(PathBuf::as_path)
+    }
+
     /// Every asset we hold, for the primary to broadcast.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Asset)> {
         self.bytes.iter()
+    }
+
+    /// Every video we can play, by layout path, for the primary to publish.
+    pub fn video_files(&self) -> Vec<(String, PathBuf)> {
+        self.wanted_videos
+            .iter()
+            .filter_map(|p| self.videos.get(p).map(|f| (p.clone(), f.clone())))
+            .collect()
+    }
+
+    /// A video file the primary's copy has been fetched into. Ignored unless
+    /// the current document names it: a download from the layout before
+    /// can finish after the next one arrived.
+    pub fn insert_video(&mut self, path: String, file: PathBuf) {
+        if self.wanted_videos.contains(&path) {
+            self.progress.remove(&path);
+            self.videos.insert(path, file);
+        }
+    }
+
+    /// How far a reflection has got downloading a video. Ignored for paths the
+    /// current document does not name, like `insert_video`.
+    pub fn set_progress(&mut self, path: String, received: u64, total: u64) {
+        if self.wanted_videos.contains(&path) && !self.videos.contains_key(&path) {
+            self.progress.insert(path, (received, total));
+        }
+    }
+
+    /// Download progress for a video, `0.0..=1.0`, while one is under way.
+    pub fn progress(&self, path: &str) -> Option<f32> {
+        let (received, total) = *self.progress.get(path)?;
+        Some(if total == 0 {
+            0.0
+        } else {
+            (received as f64 / total as f64).clamp(0.0, 1.0) as f32
+        })
     }
 
     /// Bytes that arrived from the primary.
@@ -124,16 +203,22 @@ impl Assets {
 
     /// Wanted paths we have no bytes for, each with a reason a host can act
     /// on. Document order, so the list is stable between renders.
-    pub fn missing(&self) -> Vec<(&str, &str)> {
-        self.wanted
+    pub fn missing(&self) -> Vec<(&str, String)> {
+        let images = self.wanted.iter().filter(|p| !self.bytes.contains_key(*p));
+        let videos = self
+            .wanted_videos
             .iter()
-            .filter(|p| !self.bytes.contains_key(*p))
+            .filter(|p| !self.videos.contains_key(*p));
+        images
+            .chain(videos)
             .map(|p| {
-                let why = self
-                    .errors
-                    .get(p)
-                    .map(String::as_str)
-                    .unwrap_or("not sent by the primary yet");
+                let why = match (self.errors.get(p), self.progress(p)) {
+                    (Some(error), _) => error.clone(),
+                    (None, Some(done)) => {
+                        format!("receiving from the primary, {:.0}%", done * 100.0)
+                    }
+                    (None, None) => "not sent by the primary yet".to_string(),
+                };
                 (p.as_str(), why)
             })
             .collect()
@@ -171,6 +256,25 @@ pub fn image_paths(root: &Node) -> Vec<String> {
     out
 }
 
+/// Every distinct file named by a `video` node's playlist, in document order.
+/// `when` is ignored for the same reason as [`image_paths`].
+pub fn video_paths(root: &Node) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_videos(root, &mut out);
+    out
+}
+
+/// Every file the document needs beside it, images first. What an import copies.
+pub fn media_paths(root: &Node) -> Vec<String> {
+    let mut out = image_paths(root);
+    for path in video_paths(root) {
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn walk(node: &Node, out: &mut Vec<String>) {
     match &node.widget {
         Widget::Image { path, .. } => {
@@ -181,6 +285,24 @@ fn walk(node: &Node, out: &mut Vec<String>) {
         Widget::Container(c) => {
             for child in &c.children {
                 walk(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_videos(node: &Node, out: &mut Vec<String>) {
+    match &node.widget {
+        Widget::Video(video) => {
+            for path in &video.items {
+                if !out.contains(path) {
+                    out.push(path.clone());
+                }
+            }
+        }
+        Widget::Container(c) => {
+            for child in &c.children {
+                walk_videos(child, out);
             }
         }
         _ => {}
@@ -226,7 +348,7 @@ mod tests {
         let mut assets = Assets::expecting(&root);
         assert_eq!(
             assets.missing(),
-            vec![("ana.jpg", "not sent by the primary yet")]
+            vec![("ana.jpg", "not sent by the primary yet".to_string())]
         );
 
         assets.insert("ana.jpg".to_string(), Bytes::from_static(b"\x89PNG"));
@@ -267,9 +389,74 @@ mod tests {
         let assets = Assets::from_disk(&root, &dir);
 
         assert!(assets.get("there.png").is_some(), "the file that is there");
-        assert_eq!(assets.missing(), vec![("gone.png", "file not found")]);
+        assert_eq!(
+            assets.missing(),
+            vec![("gone.png", "file not found".to_string())]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn video_files_are_found_by_path_and_missing_ones_reported() {
+        let dir = std::env::temp_dir().join(format!("gid-assets-video-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("clips")).expect("temp dir");
+        std::fs::write(dir.join("clips/bats.mp4"), b"not really a video").expect("write");
+
+        let root = root_of(
+            r#"
+            root {
+                image "photo.png"
+                video "clips/bats.mp4" { item "fog.mkv"; item "clips/bats.mp4"; }
+            }
+            "#,
+        );
+        assert_eq!(video_paths(&root), vec!["clips/bats.mp4", "fog.mkv"]);
+        assert_eq!(
+            media_paths(&root),
+            vec!["photo.png", "clips/bats.mp4", "fog.mkv"]
+        );
+
+        let assets = Assets::from_disk(&root, &dir);
+        assert_eq!(
+            assets.video("clips/bats.mp4"),
+            Some(dir.join("clips/bats.mp4").as_path())
+        );
+        assert_eq!(
+            assets.missing(),
+            vec![
+                ("photo.png", "file not found".to_string()),
+                ("fog.mkv", "file not found".to_string())
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_reflection_reports_download_progress_until_the_file_lands() {
+        let root = root_of(r#"root { video "bats.mp4" }"#);
+        let mut assets = Assets::expecting(&root);
+        assert_eq!(assets.progress("bats.mp4"), None);
+
+        assets.set_progress("bats.mp4".to_string(), 250, 1000);
+        assert_eq!(assets.progress("bats.mp4"), Some(0.25));
+        assert_eq!(
+            assets.missing(),
+            vec![("bats.mp4", "receiving from the primary, 25%".to_string())]
+        );
+
+        // Progress for a path the document does not name goes nowhere.
+        assets.set_progress("other.mp4".to_string(), 1, 2);
+        assert_eq!(assets.progress("other.mp4"), None);
+
+        assets.insert_video("bats.mp4".to_string(), PathBuf::from("/cache/b.mp4"));
+        assert_eq!(
+            assets.progress("bats.mp4"),
+            None,
+            "done, so no longer in flight"
+        );
+        assert!(assets.missing().is_empty());
     }
 
     #[test]

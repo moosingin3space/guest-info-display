@@ -276,15 +276,15 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
             }
         };
         let problems: Vec<String> = state.problems().take(6).map(|d| d.to_string()).collect();
-        // Missing images are not parse problems — the document is fine, a file
-        // beside it is not — so they get their own list rather than being
-        // folded into the diagnostics above.
+        // Missing images and videos are not parse problems — the document is
+        // fine, a file beside it is not — so they get their own list rather
+        // than being folded into the diagnostics above.
         let missing_assets: Vec<(String, String)> = m
             .assets
             .missing()
             .into_iter()
             .take(6)
-            .map(|(path, why)| (path.to_string(), why.to_string()))
+            .map(|(path, why)| (path.to_string(), why))
             .collect();
         (
             status,
@@ -444,9 +444,9 @@ fn layout_section(model: State<Model>, role: Role) -> Rect {
 
 fn missing(n: usize) -> String {
     if n == 1 {
-        "1 missing image".to_string()
+        "1 missing file".to_string()
     } else {
-        format!("{n} missing images")
+        format!("{n} missing files")
     }
 }
 

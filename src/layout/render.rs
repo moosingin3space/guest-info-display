@@ -12,16 +12,19 @@
 //!   properties, and anything the document states wins. Values are merged
 //!   before the element is built rather than set twice on the builder.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Local};
 use freya::prelude::*;
 
 use super::schema::{
     Align, Background, Container, Direction, Fit, GradientDirection, LayoutDoc, Node, Padding,
-    Rgba, Sizing, Style, TextAlign as SchemaAlign, Theme, Weight, When, Widget,
+    Rgba, Sizing, Style, TextAlign as SchemaAlign, Theme, Video, Weight, When, Widget,
 };
 use crate::Model;
 use crate::persistence::Role;
 use crate::qr_code;
+use crate::video;
 
 static SETTINGS_ICON: &[u8] = include_bytes!("../../assets/settings.svg");
 
@@ -128,6 +131,21 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
             show_artist,
         } => now_playing(heading, *cover_size, *show_artist, &n.style, parent, ctx).into(),
         Widget::UpNext { heading, count } => up_next(heading, *count, &n.style, parent, ctx).into(),
+        Widget::NowPlayingStrip {
+            direction,
+            cover_size,
+            show_next,
+            next_label,
+        } => now_playing_strip(
+            *direction,
+            *cover_size,
+            *show_next,
+            next_label,
+            &n.style,
+            parent,
+            ctx,
+        )
+        .into(),
         Widget::CoverArt { size } => cover_art(*size, &n.style, parent, ctx).into(),
         Widget::WifiQr { heading, size } => wifi_qr(heading, *size, &n.style, parent, ctx).into(),
         Widget::Text { content } => {
@@ -135,9 +153,8 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
                 .text(content.clone())
                 .into()
         }
-        // Asset mirroring is a later ticket; until then an `image` node is an
-        // honest placeholder rather than a missing element.
         Widget::Image { path, fit } => image(path, *fit, &n.style, parent, ctx).into(),
+        Widget::Video(v) => video_node(v, &n.style, parent, ctx).into(),
         Widget::RoleLabel => role_label(&n.style, parent, ctx).into(),
         Widget::SettingsButton { size } => settings_button(*size, ctx).into(),
     };
@@ -267,6 +284,88 @@ fn now_playing(
         )
 }
 
+/// The compact track line. In a row the current track takes the space the
+/// next one leaves; in a column everything stacks, centred, for a sidebar.
+fn now_playing_strip(
+    direction: Direction,
+    cover_size: f32,
+    show_next: bool,
+    next_label: &str,
+    style: &Style,
+    parent: Direction,
+    ctx: &Ctx<'_>,
+) -> Rect {
+    let row = direction == Direction::Row;
+    let mut outer = rect().overflow(Overflow::Clip);
+    if row {
+        outer = outer.horizontal().content(Content::flex());
+    }
+    let outer = apply_box(
+        outer,
+        style,
+        parent,
+        BoxDefaults {
+            spacing: Some(16.),
+            cross_align: Some(Align::Center),
+            ..BoxDefaults::default()
+        },
+    );
+
+    if ctx.disconnected {
+        return outer.child(unavailable(ctx));
+    }
+
+    // A column has room for neither shrinking nor wrapping, so it centres.
+    let align = if row {
+        TextAlign::Start
+    } else {
+        TextAlign::Center
+    };
+    // Along a row each block takes a share; down a column, the full width.
+    let block_width = if row { Size::flex(1.) } else { Size::fill() };
+    let line = |l: Label| {
+        l.width(Size::fill())
+            .max_lines(1)
+            .text_overflow(TextOverflow::Ellipsis)
+            .text_align(align)
+    };
+
+    let (name, artist) = match &ctx.model.current_track {
+        Some(t) => (t.name.clone(), t.artists.clone()),
+        None => ("Nothing playing".to_string(), String::new()),
+    };
+    let current = rect()
+        .width(block_width.clone())
+        .spacing(4.)
+        .child(line(styled_label(style, ctx, 18.0, Weight::Bold, ctx.theme.text)).text(name))
+        .child(line(label().font_size(15.).color(rgba(ctx.theme.muted_text))).text(artist));
+
+    let mut outer = outer.child(cover_box(cover_size, ctx)).child(current);
+
+    let next = ctx.model.queue.first().filter(|t| t.is_resolved());
+    if show_next && let Some(next) = next {
+        outer = outer.child(
+            rect()
+                .width(block_width)
+                .spacing(4.)
+                .child(
+                    line(
+                        label()
+                            .font_size(13.)
+                            .font_weight(FontWeight::SEMI_BOLD)
+                            .color(rgba(ctx.theme.muted_text)),
+                    )
+                    .text(next_label.to_string()),
+                )
+                .child(
+                    line(label().font_size(15.).color(rgba(ctx.theme.muted_text)))
+                        .text(format!("{} — {}", next.name, next.artists)),
+                ),
+        );
+    }
+    outer
+}
+
 fn cover_art(size: f32, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
     let outer = apply_box(rect(), style, parent, BoxDefaults::default());
     if ctx.disconnected {
@@ -302,6 +401,16 @@ fn cover_box(size: f32, ctx: &Ctx<'_>) -> Rect {
                 .aspect_ratio(AspectRatio::Max)
                 .image_cover(ImageCover::Center),
         ),
+        // Below this the words wrap into a jumble, so a small slot gets a note.
+        None if size < 80. => boxed
+            .center()
+            .background(rgba(ctx.theme.placeholder))
+            .child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .font_size(size * 0.45)
+                    .text("♪"),
+            ),
         None => boxed
             .center()
             .background(rgba(ctx.theme.placeholder))
@@ -463,6 +572,87 @@ fn image(path: &str, fit: Fit, style: &Style, parent: Direction, ctx: &Ctx<'_>) 
             .aspect_ratio(aspect)
             .image_cover(ImageCover::Center),
     )
+}
+
+/// A `video` node: its playlist playing, or a box naming the file it waits on.
+///
+/// Clips that are missing are passed over rather than failing the playlist,
+/// so one forgotten file costs a host that clip, not the screen, and joins the
+/// rotation once it turns up. The box only shows a name when *none* of the
+/// clips are here.
+fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
+    let base = rect().corner_radius(12.).overflow(Overflow::Clip);
+    let files: Vec<Option<PathBuf>> = v
+        .items
+        .iter()
+        .map(|path| ctx.model.assets.video(path).map(|p| p.to_path_buf()))
+        .collect();
+
+    if files.iter().all(Option::is_none) {
+        let placeholder = apply_box(
+            base.background(rgba(ctx.theme.placeholder)),
+            style,
+            parent,
+            BoxDefaults {
+                main_align: Some(Align::Center),
+                cross_align: Some(Align::Center),
+                spacing: Some(12.),
+                ..BoxDefaults::default()
+            },
+        );
+        // On a primary a missing clip is the host's to fix, so name it, as an
+        // image does. On a reflection it is simply still on its way.
+        if !matches!(ctx.model.role, Role::Reflection) {
+            return placeholder.child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .text(v.items[0].clone()),
+            );
+        }
+        let receiving = v.items.iter().find_map(|p| ctx.model.assets.progress(p));
+        return match receiving {
+            Some(done) => placeholder
+                .child(
+                    label()
+                        .color(rgba(ctx.theme.muted_text))
+                        .text(format!("Receiving video… {:.0}%", done * 100.0)),
+                )
+                .child(
+                    rect()
+                        .width(Size::px(240.))
+                        .height(Size::px(6.))
+                        .corner_radius(3.)
+                        .background(rgba(ctx.theme.surface_border))
+                        .child(
+                            rect()
+                                .width(Size::percent(done * 100.))
+                                .height(Size::fill())
+                                .corner_radius(3.)
+                                .background(rgba(ctx.theme.muted_text)),
+                        ),
+                ),
+            None => placeholder.child(
+                label()
+                    .color(rgba(ctx.theme.muted_text))
+                    .text("Waiting for video from the primary…"),
+            ),
+        };
+    }
+
+    // Black behind the frame, so `contain` letterboxes like a screen would.
+    apply_box(
+        base.background((0, 0, 0)),
+        style,
+        parent,
+        BoxDefaults::default(),
+    )
+    .child(video::VideoView {
+        node: v.clone(),
+        files,
+        inhibitor: ctx.model.inhibitor.clone(),
+        muted_text: rgba(ctx.theme.muted_text),
+        reflection: matches!(ctx.model.role, Role::Reflection),
+    })
 }
 
 fn role_label(style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {

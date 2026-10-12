@@ -14,6 +14,7 @@ mod persistence;
 mod qr_code;
 mod settings_dialog;
 mod spotify;
+mod video;
 
 /// Whichever task tree is producing `(state, events)` for the UI consumer.
 /// Holding the appropriate variant keeps that backend alive; replacing it
@@ -166,7 +167,11 @@ fn rebuild_backend(mut model: State<Model>) {
     // Primaries are always "connected" (they generate their own state).
     // Reflections start disconnected and flip on the first snapshot.
     m.connected = matches!(m.role, persistence::Role::Primary);
-    m.inhibitor.set(false);
+    m.inhibitor.set(inhibitor::Source::Spotify, false);
+    video::sync::set_mode(match m.role {
+        persistence::Role::Primary => video::sync::Mode::Lead,
+        persistence::Role::Reflection => video::sync::Mode::Follow,
+    });
 
     let new_backend = match m.role {
         persistence::Role::Primary => {
@@ -222,6 +227,7 @@ fn publish_layout(m: &mut Model) {
     let assets =
         layout::assets::Assets::from_disk(&m.layout.active.doc.root, &layout::config_dir());
     m.assets = assets;
+    video::sync::clear();
 
     let source = m.layout.active.text.clone();
     let bundle: Vec<(String, Vec<u8>)> = m
@@ -229,7 +235,8 @@ fn publish_layout(m: &mut Model) {
         .iter()
         .map(|(path, asset)| (path.clone(), asset.bytes.to_vec()))
         .collect();
-    m.multi_screen.broadcast_layout(source, bundle);
+    let videos = m.assets.video_files();
+    m.multi_screen.broadcast_layout(source, bundle, videos);
 }
 
 /// Apply a layout the primary pushed us, and remember it across reboots.
@@ -257,12 +264,23 @@ async fn layout_listener(
                 // those rather than rendering the last party's photos.
                 let assets = layout::assets::Assets::expecting(&m.layout.active.doc.root);
                 m.assets = assets;
+                video::sync::clear();
                 if let Err(e) = m.db.set_mirrored_layout(Some(&source)) {
                     log::warn!("layout: cannot persist the mirrored layout: {e}");
                 }
             }
             multi_screen::LayoutUpdate::Asset { path, encoded } => {
                 m.assets.insert(path, bytes::Bytes::from(encoded));
+            }
+            multi_screen::LayoutUpdate::Video { path, file } => {
+                m.assets.insert_video(path, file);
+            }
+            multi_screen::LayoutUpdate::VideoProgress {
+                path,
+                received,
+                total,
+            } => {
+                m.assets.set_progress(path, received, total);
             }
         }
     }
@@ -282,7 +300,7 @@ async fn spotify_listener(
                     m.queue = sp.queue.clone();
                     if sp.is_playing != m.is_playing {
                         m.is_playing = sp.is_playing;
-                        m.inhibitor.set(sp.is_playing);
+                        m.inhibitor.set(inhibitor::Source::Spotify, sp.is_playing);
                     }
                     m.multi_screen.broadcast_state(sp.clone());
                 }
@@ -594,6 +612,16 @@ fn app() -> impl IntoElement {
     use_ui_zoom();
 
     use_hook(move || {
+        // A primary's video players publish cues here; they go out to every
+        // reflection. Harmless on a reflection, whose players never publish.
+        let (cue_tx, cue_rx) = async_channel::bounded(32);
+        video::sync::set_outbox(cue_tx);
+        spawn(async move {
+            while let Ok(cue) = cue_rx.recv().await {
+                model.peek().multi_screen.broadcast_cue(cue);
+            }
+        });
+
         let (approvals_rx, discovered_rx) = {
             let m = model.peek();
             (m.multi_screen.approvals(), m.multi_screen.discovered())
@@ -712,7 +740,17 @@ fn approval_popup(model: State<Model>, m: &Model) -> Popup {
 }
 
 fn main() {
+    // Before anything spawns a thread: setting the environment is only sound
+    // while the process is single-threaded. Freya defaults to Vulkan on Linux,
+    // but zero-copy video imports frames on the EGL context of its OpenGL
+    // renderer, so prefer that unless the user chose otherwise.
+    if std::env::var_os("FREYA_RENDERER").is_none() {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("FREYA_RENDERER", "opengl") };
+    }
+
     pretty_env_logger::init();
+    video::init();
 
     // Freya runs its own executor. The backends start their own runtimes;
     // this one only drives UI-side timers such as the clock.

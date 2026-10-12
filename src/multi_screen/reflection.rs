@@ -11,11 +11,16 @@ use async_channel::Sender as AsyncSender;
 use iroh::{Endpoint, EndpointAddr, EndpointId};
 use tokio::sync::oneshot;
 
+use super::videos::Cache;
 use super::{
     ALPN, LayoutUpdate,
-    proto::{DisplayProtocol, PairingRequest, PairingResponse, SubscribeRequest, WireMessage},
+    proto::{
+        DisplayProtocol, PairingRequest, PairingResponse, ReadyReport, SubscribeRequest,
+        TimeRequest, WireMessage,
+    },
 };
 use crate::spotify::{CoverImage, Event, SharedSpotifyState, SpotifyState};
+use crate::video::clock;
 
 /// Drive a reflection client until shutdown. Reconnects on session end with an
 /// exponential backoff (capped at 30s, reset on each successful snapshot) per
@@ -115,6 +120,16 @@ async fn run_session(
 
     log::info!("reflection: subscribed to primary {}", primary.fmt_short());
 
+    // Fetching the current layout's videos. Replaced by each new layout, and
+    // aborted with the session; partial downloads resume next time.
+    let mut video_sync: Option<AbortOnDrop> = None;
+    // Measuring the primary's clock for as long as the session lasts.
+    let _time_sync = AbortOnDrop(tokio::spawn(sync_clock(client.clone(), endpoint.id())));
+    // Telling the primary how close we are to starting a clip it holds.
+    let _readiness = AbortOnDrop(tokio::spawn(report_readiness(
+        client.clone(),
+        endpoint.id(),
+    )));
     let mut connected = false;
     while let Some(msg) = rx.recv().await? {
         match msg {
@@ -143,7 +158,7 @@ async fn run_session(
                     return Ok(SessionEnd::ConsumerGone);
                 }
             }
-            WireMessage::Layout { source } => {
+            WireMessage::Layout { source, videos } => {
                 if layouts_tx
                     .send(LayoutUpdate::Document(source))
                     .await
@@ -151,7 +166,14 @@ async fn run_session(
                 {
                     return Ok(SessionEnd::ConsumerGone);
                 }
+                let (endpoint, layouts_tx) = (endpoint.clone(), layouts_tx.clone());
+                video_sync = Some(AbortOnDrop(tokio::spawn(async move {
+                    Cache::new()
+                        .sync(&endpoint, primary, &videos, &layouts_tx)
+                        .await;
+                })));
             }
+            WireMessage::VideoCue(cue) => crate::video::sync::receive(cue),
             WireMessage::Asset { path, encoded } => {
                 if layouts_tx
                     .send(LayoutUpdate::Asset { path, encoded })
@@ -164,5 +186,64 @@ async fn run_session(
         }
     }
 
+    drop(video_sync);
     Ok(SessionEnd::ChannelClosed)
+}
+
+/// Measure the primary's video clock for as long as the session lasts: a
+/// quick burst to lock on soon after connecting, then one round trip a second
+/// to follow drift. Each trip is timed on our own clock; see
+/// [`crate::video::clock`] for what is done with them.
+async fn sync_clock(client: irpc::Client<DisplayProtocol>, endpoint_id: EndpointId) {
+    const BURST: usize = 2 * clock::MIN_SAMPLES;
+    let mut sent = 0usize;
+    loop {
+        let t0 = clock::local_now();
+        match client.rpc(TimeRequest { endpoint_id }).await {
+            Ok(reply) => {
+                let t2 = clock::local_now();
+                if let Some(remote) = reply.clock_ns {
+                    clock::add_sample(t0, remote, t2);
+                }
+            }
+            Err(e) => log::debug!("reflection: clock sync round trip failed: {e}"),
+        }
+        sent += 1;
+        let pause = if sent < BURST { 50 } else { 1000 };
+        tokio::time::sleep(Duration::from_millis(pause)).await;
+    }
+}
+
+/// Pass the video players' readiness reports on to the primary, each time one
+/// changes. A primary holding a clip waits on these.
+async fn report_readiness(client: irpc::Client<DisplayProtocol>, endpoint_id: EndpointId) {
+    let mut sent = std::collections::HashMap::new();
+    loop {
+        for (node, readiness) in crate::video::sync::reports() {
+            if sent.get(&node) == Some(&readiness) {
+                continue;
+            }
+            let report = ReadyReport {
+                endpoint_id,
+                node,
+                readiness: readiness.clone(),
+            };
+            match client.rpc(report).await {
+                Ok(()) => {
+                    sent.insert(node, readiness);
+                }
+                Err(e) => log::debug!("reflection: readiness report failed: {e}"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Aborts its task when dropped, so a session that ends stops its downloads.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
