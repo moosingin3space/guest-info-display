@@ -214,6 +214,12 @@ impl Player {
             restarts: AtomicUsize::new(0),
         });
 
+        log::debug!(
+            "video: node {} starting as {:?}, muted {}",
+            config.node,
+            sync.mode,
+            config.muted
+        );
         let video_sink = video_sink(&kind, &shared, &playlist, &queued, &produced_frame, &sync)?;
         let playbin = gst::ElementFactory::make("playbin3")
             .property("uri", &first_uri)

@@ -651,6 +651,7 @@ fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rec
         files,
         inhibitor: ctx.model.inhibitor.clone(),
         muted_text: rgba(ctx.theme.muted_text),
+        reflection: matches!(ctx.model.role, Role::Reflection),
     })
 }
 
