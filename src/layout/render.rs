@@ -12,6 +12,8 @@
 //!   properties, and anything the document states wins. Values are merged
 //!   before the element is built rather than set twice on the builder.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Local};
 use freya::prelude::*;
 
@@ -467,18 +469,19 @@ fn image(path: &str, fit: Fit, style: &Style, parent: Direction, ctx: &Ctx<'_>) 
 
 /// A `video` node: its playlist playing, or a box naming the file it waits on.
 ///
-/// Clips that are missing are left out of the playlist rather than failing it,
-/// so one forgotten file costs a host that clip, not the screen. The box only
-/// shows a name when *none* of the clips are here.
+/// Clips that are missing are passed over rather than failing the playlist,
+/// so one forgotten file costs a host that clip, not the screen, and joins the
+/// rotation once it turns up. The box only shows a name when *none* of the
+/// clips are here.
 fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rect {
     let base = rect().corner_radius(12.).overflow(Overflow::Clip);
-    let items: Vec<_> = v
+    let files: Vec<Option<PathBuf>> = v
         .items
         .iter()
-        .filter_map(|path| ctx.model.assets.video(path).map(|p| p.to_path_buf()))
+        .map(|path| ctx.model.assets.video(path).map(|p| p.to_path_buf()))
         .collect();
 
-    if items.is_empty() {
+    if files.iter().all(Option::is_none) {
         return apply_box(
             base.background(rgba(ctx.theme.placeholder)),
             style,
@@ -504,13 +507,8 @@ fn video_node(v: &Video, style: &Style, parent: Direction, ctx: &Ctx<'_>) -> Rec
         BoxDefaults::default(),
     )
     .child(video::VideoView {
-        config: video::Config {
-            items,
-            muted: v.muted,
-            looping: v.looping,
-            shuffle: v.shuffle,
-        },
-        fit: v.fit,
+        node: v.clone(),
+        files,
         inhibitor: ctx.model.inhibitor.clone(),
         muted_text: rgba(ctx.theme.muted_text),
     })
