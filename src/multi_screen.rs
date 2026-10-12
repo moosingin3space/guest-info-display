@@ -20,10 +20,12 @@ mod endpoint;
 pub mod proto;
 mod reflection;
 mod service;
+mod videos;
 
 pub use discovery::DiscoveredNode;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver as AsyncReceiver, Sender as AsyncSender};
@@ -34,6 +36,7 @@ use irpc_iroh::IrohProtocol;
 use tokio::sync::oneshot;
 
 use proto::{DisplayProtocol, WireMessage};
+use videos::VideoRef;
 
 pub use proto::PairingResponse;
 
@@ -42,12 +45,12 @@ use crate::spotify::{self, SharedSpotifyState, SpotifyState};
 /// ALPN identifying our irpc service. Bumped when the protocol breaks
 /// compatibility — keep this in sync with the spec's "service version" notion.
 ///
-/// `/2` added `WireMessage::Layout`; `/3` added `WireMessage::Asset`. Postcard
-/// rejects an unknown discriminant, so an un-upgraded reflection cannot decode
-/// either; bumping the ALPN means it fails to connect at all and shows
-/// "Primary unavailable", which is a diagnosable failure rather than a
-/// mysterious one. Both ends must be updated together.
-pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/3";
+/// `/2` added `WireMessage::Layout`; `/3` added `WireMessage::Asset`; `/4` gave
+/// `Layout` its video hashes. Postcard rejects an unknown discriminant, so an
+/// un-upgraded reflection cannot decode either; bumping the ALPN means it fails
+/// to connect at all and shows "Primary unavailable", which is a diagnosable
+/// failure rather than a mysterious one. Both ends must be updated together.
+pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/4";
 
 /// Cross-runtime broadcast tunnel: GPUI thread pushes events synchronously,
 /// the multi-screen runtime drains them and fans them out to subscribers.
@@ -58,12 +61,21 @@ enum BroadcastEvent {
         encoded: Vec<u8>,
     },
     CoversCleared,
-    /// A document and every image it names, together. One event rather than
+    /// A document and every file it names, together. One event rather than
     /// two so the cache can never hold a layout whose assets belong to the
-    /// document before it.
+    /// document before it. Videos are local files still to be hashed.
     Layout {
         source: String,
         assets: Vec<(String, Vec<u8>)>,
+        videos: Vec<(String, PathBuf)>,
+    },
+    /// A `Layout` whose videos have been hashed, ready to send. Raised by the
+    /// hashing task, never by the UI: hashing gigabytes must not hold up the
+    /// playback state queued behind it.
+    LayoutReady {
+        source: String,
+        assets: Vec<(String, Vec<u8>)>,
+        videos: Vec<VideoRef>,
     },
 }
 
@@ -107,6 +119,8 @@ pub enum LayoutUpdate {
     Document(String),
     /// Bytes for one `image` path in the document that came before it.
     Asset { path: String, encoded: Vec<u8> },
+    /// A `video` path of the current document, now on disk and playable.
+    Video { path: String, file: PathBuf },
 }
 
 /// Hands the GPUI side a primary-mirroring backend that produces the same
@@ -156,6 +170,8 @@ struct Shared {
     /// never disagree; not persisted anywhere, since a reflection re-fetches
     /// them on its next subscribe.
     layout_assets: Mutex<Vec<(String, Vec<u8>)>>,
+    /// Hashes of the files behind the `video` nodes of `last_layout`.
+    layout_videos: Mutex<Vec<VideoRef>>,
     /// Encoded JPEG/PNG bytes keyed by Spotify cover URL. Populated each time
     /// a primary fetches a cover; cleared on session reset.
     cover_cache: Mutex<HashMap<String, Vec<u8>>>,
@@ -169,6 +185,7 @@ impl Shared {
             last_state: Mutex::new(SpotifyState::default()),
             last_layout: Mutex::new(None),
             layout_assets: Mutex::new(Vec::new()),
+            layout_videos: Mutex::new(Vec::new()),
             cover_cache: Mutex::new(HashMap::new()),
             inbound_trusted,
         })
@@ -223,10 +240,18 @@ impl MultiScreenHandle {
     /// Push the primary's layout to every live reflection, and cache it for
     /// ones that subscribe later. Called whenever the active document changes:
     /// startup, a hot reload, an import, a reload button, a role switch.
-    pub fn broadcast_layout(&self, source: String, assets: Vec<(String, Vec<u8>)>) {
-        let _ = self
-            .broadcast_tx
-            .try_send(BroadcastEvent::Layout { source, assets });
+    /// `videos` are the files on disk behind the document's `video` nodes.
+    pub fn broadcast_layout(
+        &self,
+        source: String,
+        assets: Vec<(String, Vec<u8>)>,
+        videos: Vec<(String, PathBuf)>,
+    ) {
+        let _ = self.broadcast_tx.try_send(BroadcastEvent::Layout {
+            source,
+            assets,
+            videos,
+        });
     }
 
     /// Replace the set of endpoints that the primary accepts `Subscribe`
@@ -335,6 +360,7 @@ pub fn start(secret_key: SecretKey) -> MultiScreenHandle {
     let (cmd_tx, cmd_rx) = async_channel::bounded::<Command>(8);
     let inbound_trusted: TrustState = Arc::new(Mutex::new(HashSet::new()));
     let inbound_trusted_run = inbound_trusted.clone();
+    let broadcast_tx_run = broadcast_tx.clone();
 
     let thread = std::thread::Builder::new()
         .name("multi-screen".into())
@@ -348,6 +374,7 @@ pub fn start(secret_key: SecretKey) -> MultiScreenHandle {
                     secret_key,
                     shutdown: shutdown_rx,
                     broadcast_rx,
+                    broadcast_tx: broadcast_tx_run,
                     approvals_tx,
                     discovered_tx,
                     cmd_rx,
@@ -373,6 +400,8 @@ struct MultiScreenRuntime {
     secret_key: SecretKey,
     shutdown: oneshot::Receiver<()>,
     broadcast_rx: AsyncReceiver<BroadcastEvent>,
+    /// For the hashing task to hand finished layouts back to the loop.
+    broadcast_tx: AsyncSender<BroadcastEvent>,
     approvals_tx: AsyncSender<PendingApproval>,
     discovered_tx: AsyncSender<DiscoveredNode>,
     cmd_rx: AsyncReceiver<Command>,
@@ -385,6 +414,7 @@ impl MultiScreenRuntime {
             secret_key,
             shutdown,
             broadcast_rx,
+            broadcast_tx,
             approvals_tx,
             discovered_tx,
             cmd_rx,
@@ -399,8 +429,17 @@ impl MultiScreenRuntime {
         log::info!("multi_screen: endpoint up, EndpointId = {}", endpoint.id());
 
         let shared = Shared::new(inbound_trusted);
-        let router = build_router(endpoint.clone(), shared.clone(), approvals_tx).await;
-        tokio::spawn(broadcast_loop(broadcast_rx, shared.clone()));
+        let library = videos::Library::open().await;
+        let router = build_router(
+            endpoint.clone(),
+            shared.clone(),
+            approvals_tx,
+            library.as_ref().map(videos::Library::store),
+        )
+        .await;
+        let (hash_tx, hash_rx) = async_channel::unbounded();
+        tokio::spawn(hash_loop(hash_rx, library, broadcast_tx));
+        tokio::spawn(broadcast_loop(broadcast_rx, hash_tx, shared.clone()));
         tokio::spawn(command_loop(cmd_rx, endpoint, shared));
         if let Some(mdns) = mdns {
             tokio::spawn(discovery::run(mdns, discovered_tx));
@@ -471,25 +510,76 @@ async fn command_loop(rx: AsyncReceiver<Command>, endpoint: Endpoint, shared: Ar
 
 /// Wires the service onto the router. The handler loop runs on its own task
 /// tied to the router's lifetime via the mpsc channel close.
+///
+/// The blobs protocol rides the same endpoint, serving the primary's video
+/// files to paired reflections. Every device registers it — identity is
+/// symmetric across roles — but a reflection's store simply holds nothing.
 async fn build_router(
     endpoint: Endpoint,
     shared: Arc<Shared>,
     approvals_tx: AsyncSender<PendingApproval>,
+    blobs: Option<&iroh_blobs::store::fs::FsStore>,
 ) -> Router {
     let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(16);
     let local_sender: LocalSender<DisplayProtocol> = msg_tx.into();
     let proto = IrohProtocol::with_sender(local_sender);
 
+    let trusted = shared.inbound_trusted.clone();
     tokio::spawn(service::run(msg_rx, shared, approvals_tx));
 
-    Router::builder(endpoint).accept(ALPN, proto).spawn()
+    let router = Router::builder(endpoint).accept(ALPN, proto);
+    match blobs {
+        Some(store) => router
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(store, Some(videos::serve_to_trusted(trusted))),
+            )
+            .spawn(),
+        None => router.spawn(),
+    }
+}
+
+/// Hash each layout's videos, in arrival order, and hand the finished layout
+/// back to the broadcast loop. One at a time on purpose: the last layout in
+/// is the last one out, so a slow hash can never overwrite a newer document.
+async fn hash_loop(
+    rx: AsyncReceiver<BroadcastEvent>,
+    mut library: Option<videos::Library>,
+    broadcast_tx: AsyncSender<BroadcastEvent>,
+) {
+    while let Ok(event) = rx.recv().await {
+        let BroadcastEvent::Layout {
+            source,
+            assets,
+            videos,
+        } = event
+        else {
+            continue;
+        };
+        let videos = match library.as_mut() {
+            Some(library) => library.hash_all(&videos).await,
+            None => Vec::new(),
+        };
+        let ready = BroadcastEvent::LayoutReady {
+            source,
+            assets,
+            videos,
+        };
+        if broadcast_tx.send(ready).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Drain `broadcast_rx`, update the snapshot/cover cache, and fan each event
 /// out to every live subscriber. Subscribers whose channels are closed or full
 /// are dropped — slow reflections have to reconnect for a fresh snapshot
 /// rather than wedge the broadcast.
-async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) {
+async fn broadcast_loop(
+    rx: AsyncReceiver<BroadcastEvent>,
+    hash_tx: AsyncSender<BroadcastEvent>,
+    shared: Arc<Shared>,
+) {
     while let Ok(event) = rx.recv().await {
         // A layout fans out into the document plus one message per image, so
         // every event produces a batch. Each subscriber takes the whole batch
@@ -513,16 +603,28 @@ async fn broadcast_loop(rx: AsyncReceiver<BroadcastEvent>, shared: Arc<Shared>) 
                 }
                 vec![WireMessage::CoversCleared]
             }
-            BroadcastEvent::Layout { source, assets } => {
+            layout @ BroadcastEvent::Layout { .. } => {
+                // Off to be hashed; it comes back as `LayoutReady`.
+                let _ = hash_tx.send(layout).await;
+                continue;
+            }
+            BroadcastEvent::LayoutReady {
+                source,
+                assets,
+                videos,
+            } => {
                 if let Ok(mut guard) = shared.last_layout.lock() {
                     *guard = Some(source.clone());
                 }
                 if let Ok(mut guard) = shared.layout_assets.lock() {
                     *guard = assets.clone();
                 }
+                if let Ok(mut guard) = shared.layout_videos.lock() {
+                    *guard = videos.clone();
+                }
                 // Document first: a reflection sizes its expectations from the
                 // document, so an asset arriving ahead of it has nowhere to go.
-                std::iter::once(WireMessage::Layout { source })
+                std::iter::once(WireMessage::Layout { source, videos })
                     .chain(
                         assets
                             .into_iter()
