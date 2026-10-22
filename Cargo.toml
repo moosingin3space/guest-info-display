@@ -46,7 +46,7 @@ rusqlite = { version = "0.40.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 # The skia-safe Freya's engine is built on, for wrapping video frames as GPU
 # textures. Pinned with freya-skia-bindings; `gl` is already on through Freya.
-skia-safe = { package = "freya-skia-safe", version = "=0.98.1", features = ["gl"] }
+skia-safe = { package = "freya-skia-safe", version = "=0.104.0", features = ["gl"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 vergen = "=10.0.3"
