@@ -292,6 +292,7 @@ async fn layout_listener(
             } => {
                 m.assets.set_progress(path, received, total);
             }
+            multi_screen::LayoutUpdate::Cue(cue) => video::sync::receive(cue),
             multi_screen::LayoutUpdate::Wifi(wifi) => {
                 // Kept like the mirrored layout, so a cold boot shows the
                 // last network the primary offered rather than none.
