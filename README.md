@@ -267,10 +267,10 @@ first start: the rest of the playlist keeps downloading while it plays. At a
 cold start it also gives paired reflections that have not connected yet ten
 seconds to arrive.
 
-What does *not* mirror is anything local to a device: each screen shows its own
-clock, its own role label, and — importantly — its own Wi-Fi QR code. Two
-screens in two rooms on two networks show two different codes from one layout
-file.
+The Wi-Fi network mirrors too: a reflection's QR code offers the primary's
+network, and its settings say so instead of showing Wi-Fi fields. What does
+*not* mirror is anything local to a device: each screen shows its own clock and
+its own role label.
 
 > Primary and reflection negotiate a protocol version on connect. Upgrade both
 > ends together; a reflection on an older build will report "Primary
