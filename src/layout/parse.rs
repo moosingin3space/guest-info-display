@@ -16,8 +16,8 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use miette::SourceSpan;
 
 use super::schema::{
-    Align, Background, Container, Direction, Fit, GradientDirection, GradientStop, Node, Padding,
-    Rgba, Sizing, Style, TextAlign, Theme, Typography, Video, Weight, When, Widget,
+    Align, Background, Container, Direction, Fit, Ghosts, GradientDirection, GradientStop, Node,
+    Padding, Rgba, Sizing, Style, TextAlign, Theme, Typography, Video, Weight, When, Widget,
 };
 use super::{Diagnostic, Severity, line_col};
 
@@ -813,6 +813,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                "ghosts" => theme.ghosts = Some(self.ghosts(&mut entries)),
                 other => {
                     // A theme from a newer build should degrade, not blank the
                     // screen, so unknown keys are only a warning.
@@ -825,6 +826,40 @@ impl<'a> Parser<'a> {
         }
 
         theme
+    }
+
+    fn ghosts(&mut self, entries: &mut Entries<'_>) -> Ghosts {
+        let mut ghosts = Ghosts::default();
+        if let Some(entry) = entries.take("every") {
+            match self.number(entry, "every") {
+                Some(every) if every >= 2. => ghosts.every = every,
+                Some(_) => self.warn(
+                    entry.span(),
+                    "`every` is in seconds and has to be at least 2, ignoring",
+                ),
+                None => {}
+            }
+        }
+        if let Some(entry) = entries.take("opacity") {
+            match self.number(entry, "opacity") {
+                Some(opacity) if (0. ..=1.).contains(&opacity) => ghosts.opacity = opacity,
+                Some(_) => self.warn(entry.span(), "`opacity` runs from 0 to 1, ignoring"),
+                None => {}
+            }
+        }
+        if let Some(entry) = entries.take("color")
+            && let Some(color) = self.color(entry, "color")
+        {
+            ghosts.color = color;
+        }
+        // Theme keys only warn, so an unknown property does too.
+        for (name, entry) in entries.leftovers() {
+            self.warn(
+                entry.span(),
+                format!("unknown `ghosts` property `{name}`, ignoring"),
+            );
+        }
+        ghosts
     }
 
     fn background(&mut self, node: &KdlNode, entries: &mut Entries<'_>) -> Option<Background> {
@@ -1057,6 +1092,34 @@ mod tests {
         assert_eq!(p.theme.muted_text, Rgba::new(255, 255, 255, 160));
         // Untouched keys keep the built-in values.
         assert_eq!(p.theme.surface, Theme::default().surface);
+    }
+
+    #[test]
+    fn ghosts_are_off_unless_asked_for() {
+        assert_eq!(ok("theme { }").theme.ghosts, None);
+
+        let p = ok("theme { ghosts }");
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        assert_eq!(p.theme.ghosts, Some(Ghosts::default()));
+
+        let p = ok(r##"theme { ghosts every=45 opacity=0.5 color="#ff8a1a" }"##);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        let ghosts = p.theme.ghosts.unwrap();
+        assert_eq!(ghosts.every, 45.);
+        assert_eq!(ghosts.opacity, 0.5);
+        assert_eq!(ghosts.color, Rgba::opaque(255, 138, 26));
+    }
+
+    #[test]
+    fn out_of_range_ghosts_keep_their_defaults_with_a_warning() {
+        let p = ok("theme { ghosts every=0.5 opacity=3 speed=2 }");
+        assert_eq!(p.theme.ghosts, Some(Ghosts::default()));
+        assert_eq!(p.diagnostics.len(), 3, "{:?}", p.diagnostics);
+        assert!(
+            p.diagnostics
+                .iter()
+                .all(|d| d.severity == Severity::Warning)
+        );
     }
 
     #[test]

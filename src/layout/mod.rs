@@ -15,6 +15,7 @@
 //! the party's layout, not a stack trace.
 
 pub mod assets;
+mod ghosts;
 pub mod import;
 pub mod parse;
 pub mod render;

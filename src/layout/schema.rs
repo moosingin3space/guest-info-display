@@ -292,6 +292,29 @@ pub struct Theme {
     pub muted_text: Rgba,
     pub font_family: Option<String>,
     pub mono_font_family: Option<String>,
+    /// Ghosts drifting across the background, behind everything else. Off
+    /// unless the theme asks for them.
+    pub ghosts: Option<Ghosts>,
+}
+
+/// `ghosts every=30 opacity=0.3 color="#f4f1ff"`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ghosts {
+    /// Average seconds between ghosts. Each gap is drawn from half to one and
+    /// a half times this, so they never arrive on a beat.
+    pub every: f32,
+    pub opacity: f32,
+    pub color: Rgba,
+}
+
+impl Default for Ghosts {
+    fn default() -> Self {
+        Self {
+            every: 30.,
+            opacity: 0.3,
+            color: Rgba::opaque(244, 241, 255),
+        }
+    }
 }
 
 impl Default for Theme {
@@ -317,6 +340,7 @@ impl Default for Theme {
             muted_text: Rgba::new(255, 255, 255, 140),
             font_family: None,
             mono_font_family: Some("Adwaita Mono".to_string()),
+            ghosts: None,
         }
     }
 }
