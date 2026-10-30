@@ -12,3 +12,5 @@ generated-sources.json
 specs
 # CocoIndex Code (ccc)
 /.cocoindex_code/
+# Per-party layouts and their media (reflinked clips are far too big to track).
+/parties/
