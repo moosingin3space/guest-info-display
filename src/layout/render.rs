@@ -66,6 +66,12 @@ pub fn render(
         },
     );
 
+    // First, so everything else paints over it.
+    let root = match doc.theme.ghosts {
+        Some(ghosts) => root.child(super::ghosts::GhostLayer { ghosts }),
+        None => root,
+    };
+
     let (direction, children) = unwrap_container(&doc.root);
     let root = container_children(root, direction, children, &ctx);
 

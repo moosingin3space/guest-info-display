@@ -166,6 +166,12 @@ entries), `surface`, `surface-border`, `placeholder`, `text`, `muted-text`,
 `font-family` and `mono-font-family`. Font families have to be installed in the
 runtime already; an unavailable one falls back silently.
 
+`ghosts` sends a ghost drifting across the background now and then, behind
+everything else (an opaque `video` or image hides it as it passes). `every`
+is the average number of seconds between them (30), and each gap is random,
+from half to one and a half times that; `opacity` (0.3) and `color` set how
+they look. Each screen picks its own moments.
+
 ### Showing things conditionally
 
 Any node takes `when=`, and renders only in that state: `playing`, `idle`,
