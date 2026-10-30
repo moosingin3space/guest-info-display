@@ -51,6 +51,16 @@ pub struct Painter {
     reported: bool,
 }
 
+/// Whether an EGL context is current on this thread. Freya's is, on the UI
+/// thread, when its OpenGL renderer runs on EGL. Under X11 it usually runs on
+/// GLX instead (glutin tries GLX first there), and a DMA-BUF has nothing to be
+/// imported into.
+pub fn egl_is_current() -> bool {
+    egl::Instance::new(egl::Static)
+        .get_current_display()
+        .is_some()
+}
+
 struct GlFns {
     egl: egl::Instance<egl::Static>,
     display: egl::Display,

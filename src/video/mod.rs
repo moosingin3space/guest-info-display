@@ -10,7 +10,9 @@
 //! - **DMA-BUF** — VA-API decodes, `vapostproc` converts to RGB on the GPU's
 //!   video engine, and the frame is imported straight into a GL texture. No
 //!   pixel crosses the CPU, which is what makes 4K on an integrated GPU work.
-//!   Needs VA-API and Freya's OpenGL renderer.
+//!   Needs VA-API and Freya's OpenGL renderer on EGL. Under X11 (Steam's
+//!   gaming mode runs apps on Gamescope's Xwayland) glutin picks GLX, so the
+//!   first player to start checks and falls back to copying.
 //! - **Raster** — anything else: frames are converted to RGBA in system memory
 //!   and copied. Fine at 1080p, heavy at 4K, but it always works.
 
@@ -70,6 +72,24 @@ pub fn frame_kind() -> FrameKind {
                 FrameKind::Raster
             }
         }
+    })
+    .clone()
+}
+
+/// The frame path players use: [`frame_kind`], plus the one thing it cannot
+/// know at startup, before any window exists — whether Freya's GL context is
+/// EGL. Called as a player starts, on the UI thread where that context is
+/// current, and decided once.
+pub fn player_frame_kind() -> FrameKind {
+    static KIND: OnceLock<FrameKind> = OnceLock::new();
+    KIND.get_or_init(|| match frame_kind() {
+        FrameKind::Dmabuf(_) if !paint::egl_is_current() => {
+            log::info!(
+                "video: Freya's GL context is not EGL (GLX under X11?), copying frames instead"
+            );
+            FrameKind::Raster
+        }
+        kind => kind,
     })
     .clone()
 }

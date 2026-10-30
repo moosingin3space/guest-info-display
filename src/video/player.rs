@@ -40,7 +40,7 @@ use gstreamer_video as gst_video;
 
 use super::playlist::Playlist;
 use super::sync::{self, Cue, Mode, Readiness};
-use super::{FrameKind, clock, frame_kind};
+use super::{FrameKind, clock, player_frame_kind};
 use crate::inhibitor::VideoLease;
 
 /// Drift a follower lets stand: well under a frame at 30 fps.
@@ -179,7 +179,7 @@ fn to_uris(items: &[Option<PathBuf>]) -> Vec<Option<String>> {
 impl Player {
     /// Build the pipeline and start the first clip.
     pub fn start(config: Config, lease: VideoLease) -> Result<Self, String> {
-        let kind = frame_kind();
+        let kind = player_frame_kind();
         let (wake_tx, wake) = async_channel::bounded(1);
         let shared = Arc::new(Shared {
             frame: Mutex::new(None),
