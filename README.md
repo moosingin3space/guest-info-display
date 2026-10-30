@@ -147,7 +147,7 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `qr` | The text to encode — usually a URL — as the first argument; `heading`, `caption` (small text under the code), `size` (220) |
 | `text` | The string to show, as the first argument |
 | `image` | Path as the first argument, `fit="cover"` or `"contain"` |
-| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`), `wait-for-reflections` (`#false`) |
+| `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`), `wait-for-reflections` (`#false`), `switch-every` (seconds; cut to the next clip after that long and resume each where it left off) |
 | `role-label` | This device's role and short id |
 | `settings-button` | `size` (24) |
 
@@ -273,6 +273,15 @@ takes, but never for a screen that has disconnected, and only for the very
 first start: the rest of the playlist keeps downloading while it plays. At a
 cold start it also gives paired reflections that have not connected yet ten
 seconds to arrive.
+
+**A few minutes of each.** With `switch-every=240`, a `video` cuts to the next
+clip every four minutes instead of playing each to its end, and picks each clip
+up where it was left the next time it comes round, from a few seconds earlier
+so the thread is easy to pick back up. With `shuffle=#true` that channel-surfs
+a playlist of films, so everyone at the party catches some of each. A clip seen
+to its end, or left with under half a minute to go, starts over next time.
+Positions are kept in memory, so they reset when the app restarts.
+Reflections follow each cut like any other.
 
 The Wi-Fi network mirrors too: a reflection's QR code offers the primary's
 network, and its settings say so instead of showing Wi-Fi fields. What does

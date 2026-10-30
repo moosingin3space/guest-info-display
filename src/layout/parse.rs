@@ -32,6 +32,9 @@ pub const MAX_UP_NEXT: usize = 25;
 /// A night's worth of clips is dozens, not thousands.
 pub const MAX_PLAYLIST: usize = 100;
 
+/// The shortest `switch-every`, in seconds.
+const MIN_SWITCH_EVERY: u32 = 10;
+
 /// Widget and container node names, for dispatch and for "did you mean".
 const WIDGET_NAMES: &[&str] = &[
     "column",
@@ -744,7 +747,23 @@ impl<'a> Parser<'a> {
             wait_for_reflections: self
                 .opt_bool(entries, "wait-for-reflections")
                 .unwrap_or(false),
+            switch_every: self.switch_every(entries),
         })
+    }
+
+    /// `switch-every=240`: seconds, and at least [`MIN_SWITCH_EVERY`], since
+    /// every switch costs a moment of loading on each screen.
+    fn switch_every(&mut self, entries: &mut Entries<'_>) -> Option<u32> {
+        let entry = entries.take("switch-every")?;
+        let seconds = self.number(entry, "switch-every")?;
+        if seconds < MIN_SWITCH_EVERY as f32 {
+            self.error(
+                entry.span(),
+                format!("`switch-every` is in seconds and has to be at least {MIN_SWITCH_EVERY}"),
+            );
+            return None;
+        }
+        Some(seconds.round() as u32)
     }
 
     fn report_leftovers(&mut self, entries: &Entries<'_>) {
@@ -1393,6 +1412,7 @@ mod tests {
                 looping: true,
                 shuffle: false,
                 wait_for_reflections: false,
+                switch_every: None,
             }
         );
     }
@@ -1413,6 +1433,18 @@ mod tests {
         assert_eq!(v.items, ["intro.mp4", "clips/bats.mkv", "clips/fog.webm"]);
         assert_eq!(v.fit, Fit::Contain);
         assert!(!v.muted && !v.looping && v.shuffle && v.wait_for_reflections);
+        assert_eq!(v.switch_every, None);
+    }
+
+    #[test]
+    fn switch_every_is_whole_seconds_with_a_floor() {
+        let (v, diagnostics) = video_of(r#"root { video "a.mp4" "b.mp4" switch-every=240 }"#);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(v.switch_every, Some(240));
+
+        let (v, diagnostics) = video_of(r#"root { video "a.mp4" "b.mp4" switch-every=3 }"#);
+        assert_eq!(v.switch_every, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     }
 
     #[test]

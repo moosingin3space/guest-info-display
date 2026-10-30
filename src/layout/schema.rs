@@ -241,6 +241,10 @@ pub struct Video {
     /// On a primary: hold the first clip on its first frame until every
     /// connected reflection has it loaded too, then start them all together.
     pub wait_for_reflections: bool,
+    /// Cut to the next clip after this many seconds, picking each clip up
+    /// where it was last left, so a long playlist of films is seen a few
+    /// minutes of each at a time. `None` plays each clip to its end.
+    pub switch_every: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

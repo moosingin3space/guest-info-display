@@ -55,6 +55,10 @@ impl Component for VideoView {
                 looping: self.node.looping,
                 shuffle: self.node.shuffle,
                 wait: self.node.wait_for_reflections,
+                switch_every: self
+                    .node
+                    .switch_every
+                    .map(|s| std::time::Duration::from_secs(s.into())),
             };
             let inhibitor = self.inhibitor.clone();
             move || {
