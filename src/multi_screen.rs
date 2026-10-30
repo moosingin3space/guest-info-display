@@ -134,6 +134,11 @@ pub enum LayoutUpdate {
     },
     /// The primary's Wi-Fi network, for the QR code.
     Wifi(Option<WifiCredentials>),
+    /// What a `video` node is playing. On this channel rather than handed to
+    /// `video::sync` straight off the wire, so it lands after the document it
+    /// names: applying a new document clears the cues, and one that arrived
+    /// first would be wiped, leaving its node with no cue to follow.
+    Cue(crate::video::sync::Cue),
 }
 
 /// Hands the GPUI side a primary-mirroring backend that produces the same

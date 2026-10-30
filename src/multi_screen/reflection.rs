@@ -173,7 +173,11 @@ async fn run_session(
                         .await;
                 })));
             }
-            WireMessage::VideoCue(cue) => crate::video::sync::receive(cue),
+            WireMessage::VideoCue(cue) => {
+                if layouts_tx.send(LayoutUpdate::Cue(cue)).await.is_err() {
+                    return Ok(SessionEnd::ConsumerGone);
+                }
+            }
             WireMessage::Wifi(wifi) => {
                 if layouts_tx.send(LayoutUpdate::Wifi(wifi)).await.is_err() {
                     return Ok(SessionEnd::ConsumerGone);
