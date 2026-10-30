@@ -109,6 +109,7 @@ impl Component for VideoView {
 
         let waiting = match &*player.shared().status.lock().unwrap() {
             Status::Waiting { screens, progress } => Some(waiting_caption(*screens, *progress)),
+            Status::Joining { ready, progress } => Some(joining_caption(*ready, *progress)),
             _ => None,
         };
 
@@ -123,7 +124,7 @@ impl Component for VideoView {
             .expanded(),
         );
         match waiting {
-            // Over the paused first frame, so the host can see why it waits.
+            // Over the frame on screen, so the host can see why it waits.
             Some(caption) => view.child(
                 rect()
                     .position(Position::new_absolute().bottom(16.).left(16.))
@@ -154,6 +155,15 @@ fn waiting_caption(screens: usize, progress: Option<f32>) -> String {
     match progress {
         Some(done) => format!("Waiting for {who}… {:.0}%", done * 100.0),
         None => format!("Waiting for {who}…"),
+    }
+}
+
+/// A reflection's side of the same wait: "Getting ready to start together… 40%".
+fn joining_caption(ready: bool, progress: Option<f32>) -> String {
+    match (ready, progress) {
+        (true, _) => "Ready, waiting for the other screens…".to_string(),
+        (false, Some(done)) => format!("Getting ready to start together… {:.0}%", done * 100.0),
+        (false, None) => "Getting ready to start together…".to_string(),
     }
 }
 

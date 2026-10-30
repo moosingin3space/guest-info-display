@@ -85,6 +85,13 @@ pub enum Status {
         screens: usize,
         progress: Option<f32>,
     },
+    /// A reflection getting the clip its primary is holding ready to start
+    /// together: downloading it (`progress` of it so far), loading it, or —
+    /// once `ready` — waiting for the start.
+    Joining {
+        ready: bool,
+        progress: Option<f32>,
+    },
     Playing,
     /// A non-looping playlist ran out. Its last frame stays up.
     Finished,
@@ -697,18 +704,23 @@ impl BusWatcher {
             self.prepare(pipeline, index);
         }
         let ready = index.is_some() && self.prepared == index;
+        let progress = if ready {
+            None
+        } else {
+            sync::progress(&cue.current)
+        };
         sync::report(
             self.sync.node,
             Readiness {
                 path: cue.current.clone(),
                 ready,
-                progress: if ready {
-                    None
-                } else {
-                    sync::progress(&cue.current)
-                },
+                progress,
             },
         );
+        let joining = Status::Joining { ready, progress };
+        if *self.shared.status.lock().unwrap() != joining {
+            self.shared.set_status(joining);
+        }
         if ready {
             self.seen_cue = generation;
             *self.sync.next.lock().unwrap() = cue
