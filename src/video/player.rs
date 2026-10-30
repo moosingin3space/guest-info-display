@@ -17,6 +17,11 @@
 //! exactly that. So a cut between files is a restart: let the clip end, then
 //! start the next one from NULL.
 //!
+//! With `switch-every`, a leading or solo player also cuts away mid-clip once
+//! a clip has been on that long, noting where it left off; the next time that
+//! clip comes round it resumes there, a moment early from the keyframe
+//! before. A clip that reaches its end starts from the top next time.
+//!
 //! ## Across screens
 //!
 //! On a primary the player *leads*: it runs on the shared clock and, at each
@@ -27,6 +32,7 @@
 //! drifted, and plays the clip the primary queued next. Until it can follow —
 //! no clock yet, or a cued clip it does not have — it plays on its own.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,6 +63,9 @@ const START_LEAD_NS: u64 = 500_000_000;
 /// that have not connected yet. At a cold start the primary is usually up
 /// first; without this it would find nobody to wait for and start alone.
 const ARRIVAL_GRACE: Duration = Duration::from_secs(10);
+/// A clip left with less than this to go starts from the top next time: a
+/// few seconds of credits are not worth a cut.
+const RESUME_MIN_REMAINING: Duration = Duration::from_secs(30);
 
 /// What a `video` node asked to play, resolved to files on this device.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,6 +82,8 @@ pub struct Config {
     pub shuffle: bool,
     /// On a primary: hold the first clip until the reflections have it.
     pub wait: bool,
+    /// Cut to the next clip after this long, resuming each where it left off.
+    pub switch_every: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +154,9 @@ struct Sync {
     /// segment as the last restarted one, so the segment alone cannot tell
     /// two of them apart.
     restarts: AtomicUsize,
+    /// When the current clip's first frame (or first after a seek or loop) was
+    /// on screen, for `switch-every`.
+    clip_started: Mutex<Option<std::time::Instant>>,
 }
 
 impl Sync {
@@ -219,6 +233,7 @@ impl Player {
             next: Mutex::new(None),
             pos0: Mutex::new(None),
             restarts: AtomicUsize::new(0),
+            clip_started: Mutex::new(None),
         });
 
         log::debug!(
@@ -301,11 +316,13 @@ impl Player {
             lease,
             sync,
             seen_cue: 0,
-            aligned: 0,
+            aligned: None,
             patience: 0,
             prepared: None,
             holding: holding.then_some(first),
             started: std::time::Instant::now(),
+            switch_every: config.switch_every,
+            resume: HashMap::new(),
         };
         let bus = playbin.bus().ok_or("pipeline has no bus")?;
         thread::Builder::new()
@@ -480,6 +497,7 @@ fn video_sink(
                     .map(|s| (sync.restarts.load(Ordering::Relaxed), s.base(), s.start()));
                 if key.is_some() && key != last_start {
                     last_start = key;
+                    *sync.clip_started.lock().unwrap() = Some(std::time::Instant::now());
                     let item = queued.load(Ordering::Relaxed);
                     let pos0 = pos0_of(sink, &sample);
                     *sync.pos0.lock().unwrap() = pos0;
@@ -554,9 +572,11 @@ struct BusWatcher {
     sync: Arc<Sync>,
     /// Arrival counter of the last cue acted on.
     seen_cue: u64,
-    /// `pos0` of the clip start we last lined up with. A cue repeating it only
-    /// adds the clip after; an older one is stale.
-    aligned: u64,
+    /// The clip and `pos0` of the clip start we last lined up with. A cue
+    /// repeating it only adds the clip after; an older start of the same clip
+    /// is stale. Starts of different clips do not compare: with
+    /// `switch-every` a clip resumed an hour in has a `pos0` an hour ago.
+    aligned: Option<(String, u64)>,
     /// Passes a large drift has been given to resolve on its own: at a clip
     /// boundary, our first frame of the new clip may be a moment behind the
     /// cue for it.
@@ -569,6 +589,10 @@ struct BusWatcher {
     holding: Option<usize>,
     /// When this player started, for [`ARRIVAL_GRACE`].
     started: std::time::Instant,
+    /// Lead or solo: cut away from a clip after this long on screen.
+    switch_every: Option<Duration>,
+    /// Where each clip cut away from was left, by playlist index.
+    resume: HashMap<usize, gst::ClockTime>,
 }
 
 impl BusWatcher {
@@ -596,6 +620,8 @@ impl BusWatcher {
             }
             if let Some(first) = self.holding {
                 self.hold(&pipeline, first);
+            } else if self.sync.mode != Mode::Follow {
+                self.maybe_switch(&pipeline);
             }
             let Some(msg) = msg else {
                 continue;
@@ -613,6 +639,8 @@ impl BusWatcher {
                     self.lease.set(change.current() == gst::State::Playing);
                 }
                 gst::MessageView::Eos(_) => {
+                    // Seen to the end: next time it starts from the top.
+                    self.resume.remove(&self.current.load(Ordering::Relaxed));
                     let next = self.after_eos.lock().unwrap().take();
                     match next {
                         // A locked follower never starts a clip on its own
@@ -747,8 +775,13 @@ impl BusWatcher {
             self.ready_for(pipeline, generation, &cue);
             return;
         }
-        // A clip start older than one we already lined up with: stale.
-        if cue.pos0 < self.aligned {
+        let same_clip = self
+            .aligned
+            .as_ref()
+            .filter(|(path, _)| *path == cue.current)
+            .map(|(_, pos0)| *pos0);
+        // A start of this clip older than one we already lined up with: stale.
+        if same_clip.is_some_and(|pos0| cue.pos0 < pos0) {
             self.seen_cue = generation;
             return;
         }
@@ -760,7 +793,7 @@ impl BusWatcher {
             .and_then(|path| self.sync.index_of(path))
             .filter(|i| available(*i));
         // The same clip start again, now naming the clip after: noted above.
-        if cue.pos0 == self.aligned {
+        if same_clip == Some(cue.pos0) {
             self.seen_cue = generation;
             return;
         }
@@ -773,7 +806,7 @@ impl BusWatcher {
 
         // Already loaded and waiting at position 0: play it on the cue.
         if self.prepared == Some(index) {
-            self.done_with(generation, cue.pos0);
+            self.done_with(generation, &cue);
             self.play_prepared(pipeline, cue.pos0, index);
             return;
         }
@@ -785,7 +818,7 @@ impl BusWatcher {
         {
             let drift = pos0 as i64 - cue.pos0 as i64;
             if drift.abs() <= TOLERANCE_NS {
-                self.done_with(generation, cue.pos0);
+                self.done_with(generation, &cue);
                 return;
             }
             if drift.abs() < NUDGE_LIMIT_NS {
@@ -795,7 +828,7 @@ impl BusWatcher {
                 );
                 shift_base_time(pipeline, drift);
                 *self.sync.pos0.lock().unwrap() = Some(cue.pos0);
-                self.done_with(generation, cue.pos0);
+                self.done_with(generation, &cue);
                 return;
             }
             // Probably our first frame of this clip is still on its way.
@@ -804,14 +837,49 @@ impl BusWatcher {
                 return;
             }
         }
-        self.done_with(generation, cue.pos0);
+        self.done_with(generation, &cue);
         self.lock_on(pipeline, index, cue.pos0);
     }
 
-    fn done_with(&mut self, generation: u64, pos0: u64) {
+    fn done_with(&mut self, generation: u64, cue: &Cue) {
         self.seen_cue = generation;
-        self.aligned = pos0;
+        self.aligned = Some((cue.current.clone(), cue.pos0));
         self.patience = 0;
+    }
+
+    /// Lead or solo, with `switch-every`: once the clip on screen has had its
+    /// turn, note where it got to and cut to the next one.
+    fn maybe_switch(&mut self, pipeline: &gst::Element) {
+        let Some(every) = self.switch_every else {
+            return;
+        };
+        let started = *self.sync.clip_started.lock().unwrap();
+        if !started.is_some_and(|t| t.elapsed() >= every) {
+            return;
+        }
+        let current = self.current.load(Ordering::Relaxed);
+        let Some(next) = pick_next(&self.sync, &self.playlist) else {
+            return;
+        };
+        if next == current {
+            // Nothing else to show yet: give it another turn, and keep the
+            // pick so the cue already naming it stays right.
+            if self.sync.mode == Mode::Lead {
+                *self.sync.planned.lock().unwrap() = Some(next);
+            }
+            *self.sync.clip_started.lock().unwrap() = Some(std::time::Instant::now());
+            return;
+        }
+        if let Some(position) = pipeline.query_position::<gst::ClockTime>() {
+            self.resume.insert(current, position);
+        }
+        log::info!(
+            "video: switching from {} at {:.0}s to {}",
+            self.describe(current),
+            self.resume.get(&current).map_or(0., |p| p.seconds_f64()),
+            self.describe(next)
+        );
+        self.restart_on(pipeline, next);
     }
 
     /// Load clip `index` paused on its first frame, on the shared clock, with
@@ -923,7 +991,8 @@ impl BusWatcher {
 
     /// An errored pipeline stops, so restarting on the next clip is ours to
     /// do. Gives up once every clip has failed in a row.
-    fn skip_past_failure(&self, pipeline: &gst::Element, file: &str, why: &str) {
+    fn skip_past_failure(&mut self, pipeline: &gst::Element, file: &str, why: &str) {
+        self.resume.remove(&self.current.load(Ordering::Relaxed));
         let next = {
             let mut playlist = self.playlist.lock().unwrap();
             if playlist.failed() {
@@ -945,7 +1014,8 @@ impl BusWatcher {
         self.restart_on(pipeline, next);
     }
 
-    /// Stop, point the pipeline at item `next`, and play it from the top.
+    /// Stop, point the pipeline at item `next`, and play it from the top, or
+    /// from where `switch-every` last left it.
     fn restart_on(&self, pipeline: &gst::Element, next: usize) {
         if self.stop.load(Ordering::Relaxed) {
             return;
@@ -957,6 +1027,9 @@ impl BusWatcher {
         };
         // NULL for the same reason as in `lock_on`.
         let _ = pipeline.set_state(gst::State::Null);
+        // Its turn starts at its first frame, not now: loading takes a moment,
+        // and the old clip's start would make another switch look overdue.
+        *self.sync.clip_started.lock().unwrap() = None;
         self.sync.restarts.fetch_add(1, Ordering::Relaxed);
         self.queued.store(next, Ordering::Relaxed);
         self.current.store(next, Ordering::Relaxed);
@@ -965,7 +1038,41 @@ impl BusWatcher {
         // locked fixed it, and playing on from a stale one would drop every
         // frame as late.
         pipeline.set_start_time(gst::ClockTime::ZERO);
+        if let Some(&position) = self.resume.get(&next) {
+            self.seek_paused(pipeline, position);
+        }
         let _ = pipeline.set_state(gst::State::Playing);
+    }
+
+    /// Preroll the freshly loaded clip and seek it to `position`, from the
+    /// keyframe before: quicker than decoding up to the exact frame, and a
+    /// few seconds of overlap help a viewer pick the thread back up. Cues
+    /// carry the frame actually shown, so reflections still match it.
+    fn seek_paused(&self, pipeline: &gst::Element, position: gst::ClockTime) {
+        let _ = pipeline.set_state(gst::State::Paused);
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
+        let near_end = pipeline
+            .query_duration::<gst::ClockTime>()
+            .is_some_and(|d| {
+                position.nseconds() + RESUME_MIN_REMAINING.as_nanos() as u64 >= d.nseconds()
+            });
+        if near_end {
+            return;
+        }
+        if pipeline
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_BEFORE,
+                position,
+            )
+            .is_err()
+        {
+            log::warn!(
+                "video: could not resume at {:.0}s, playing from the top",
+                position.seconds_f64()
+            );
+            return;
+        }
+        let _ = pipeline.state(gst::ClockTime::from_seconds(5));
     }
 }
 
