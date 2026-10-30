@@ -4,6 +4,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use chrono::Local;
 use freya::prelude::*;
+use freya::winit::window::Fullscreen;
 use iroh::EndpointId;
 
 mod audio_devices;
@@ -773,6 +774,12 @@ fn main() {
     let app_id =
         std::env::var("FLATPAK_ID").unwrap_or_else(|_| "xyz.mooshq.GuestInfoDisplay".into());
 
+    // Steam's gaming mode runs games inside Gamescope, which exports these to
+    // its clients (and Flatpak passes them through).
+    let under_gamescope = std::env::var_os("GAMESCOPE_WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_CURRENT_DESKTOP")
+            .is_ok_and(|desktop| desktop.to_ascii_lowercase().contains("gamescope"));
+
     launch(
         LaunchConfig::new().with_window(
             WindowConfig::new(app)
@@ -780,7 +787,16 @@ fn main() {
                 .with_app_id(app_id)
                 .with_size(1280., 800.)
                 .with_background((10, 16, 51))
-                .with_decorations(!hide_titlebar),
+                .with_decorations(!hide_titlebar)
+                .with_window_attributes(move |attributes, _| {
+                    // Gamescope letterboxes a window to keep its aspect
+                    // ratio, so a 16:10 window never fills a 16:9 TV.
+                    if under_gamescope {
+                        attributes.with_fullscreen(Some(Fullscreen::Borderless(None)))
+                    } else {
+                        attributes
+                    }
+                }),
         ),
     )
 }
