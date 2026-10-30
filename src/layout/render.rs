@@ -850,17 +850,17 @@ fn with_background(r: Rect, b: &Background) -> Rect {
 }
 
 /// The document speaks CSS directions because that is what an author will have
-/// seen before. Freya's angles run the other way: its 0° is top-to-bottom,
-/// where CSS calls that 180deg.
+/// seen before. Freya's angles are CSS's turned half way round: its 0° is
+/// top-to-bottom, where CSS calls that 180deg, and its 90° runs to the left.
 fn gradient_angle(d: GradientDirection) -> f32 {
     match d {
         GradientDirection::Bottom => 0.,
-        GradientDirection::Right => 90.,
+        GradientDirection::BottomLeft => 45.,
+        GradientDirection::Left => 90.,
+        GradientDirection::TopLeft => 135.,
         GradientDirection::Top => 180.,
-        GradientDirection::Left => 270.,
-        GradientDirection::BottomRight => 45.,
-        GradientDirection::TopRight => 135.,
-        GradientDirection::TopLeft => 225.,
-        GradientDirection::BottomLeft => 315.,
+        GradientDirection::TopRight => 225.,
+        GradientDirection::Right => 270.,
+        GradientDirection::BottomRight => 315.,
     }
 }
