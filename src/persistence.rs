@@ -2,13 +2,14 @@ use std::path::PathBuf;
 
 use iroh::{EndpointId, SecretKey};
 use rusqlite::{Connection, Result, params};
+use serde::{Deserialize, Serialize};
 
 const APP_DIR: &str = "xyz.mooshq.GuestInfoDisplay";
 const DB_FILENAME: &str = "guest-info-display.db";
 
 /// Wi-Fi security protocol. The string representations match the Wi-Fi QR code
 /// format (WIFI:T:<security>;...) as specified by ZXing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WifiSecurity {
     None,
     Wpa,
@@ -41,7 +42,7 @@ impl rusqlite::types::FromSql for WifiSecurity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WifiCredentials {
     pub ssid: String,
     pub password: String,
@@ -171,6 +172,12 @@ impl Database {
                  security = excluded.security",
             params![creds.ssid, creds.password, creds.security],
         )?;
+        Ok(())
+    }
+
+    pub fn clear_wifi_credentials(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM wifi_credentials WHERE id = 1", [])?;
         Ok(())
     }
 

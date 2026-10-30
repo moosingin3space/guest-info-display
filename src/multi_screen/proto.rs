@@ -15,6 +15,7 @@ use irpc::rpc_requests;
 use serde::{Deserialize, Serialize};
 
 use super::videos::VideoRef;
+use crate::persistence::WifiCredentials;
 use crate::spotify::SpotifyState;
 use crate::video::sync::{Cue, Readiness};
 
@@ -131,11 +132,17 @@ pub enum WireMessage {
     /// primary's clock; see `crate::video::sync`. The newest per node is
     /// replayed on subscribe, after the layout it belongs to.
     VideoCue(Cue),
+
+    /// The network guests join, which the reflection's QR code shows. `None`
+    /// when the primary has none set. Replayed on subscribe; only paired
+    /// reflections get it, over the same encrypted stream as everything else.
+    Wifi(Option<WifiCredentials>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::WifiSecurity;
     use crate::spotify::SpotifyTrackInfo;
 
     fn sample_state() -> SpotifyState {
@@ -182,6 +189,12 @@ mod tests {
                 next: Some("bats.mp4".into()),
                 pending: false,
             }),
+            WireMessage::Wifi(Some(WifiCredentials {
+                ssid: "Guests".into(),
+                password: "hunter22".into(),
+                security: WifiSecurity::Wpa,
+            })),
+            WireMessage::Wifi(None),
         ];
 
         for original in cases {

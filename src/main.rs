@@ -208,6 +208,15 @@ fn rebuild_backend(mut model: State<Model>) {
     // A fresh primary has reflections to tell about its layout, and a device
     // that has just become one has a layout they have never seen.
     publish_layout(&mut m);
+    publish_wifi(&m);
+}
+
+/// Push the Wi-Fi network to every reflection — if we are the primary — so
+/// their QR codes offer the same one. A no-op on a reflection.
+fn publish_wifi(m: &Model) {
+    if matches!(m.role, persistence::Role::Primary) {
+        m.multi_screen.broadcast_wifi(m.wifi_creds.clone());
+    }
 }
 
 /// Re-read the active document's images, and push document and images to every
@@ -283,6 +292,18 @@ async fn layout_listener(
             } => {
                 m.assets.set_progress(path, received, total);
             }
+            multi_screen::LayoutUpdate::Wifi(wifi) => {
+                // Kept like the mirrored layout, so a cold boot shows the
+                // last network the primary offered rather than none.
+                let saved = match &wifi {
+                    Some(creds) => m.db.set_wifi_credentials(creds),
+                    None => m.db.clear_wifi_credentials(),
+                };
+                if let Err(e) = saved {
+                    log::warn!("wifi: cannot persist the mirrored network: {e}");
+                }
+                m.wifi_creds = wifi;
+            }
         }
     }
 }
@@ -336,13 +357,17 @@ fn save_settings(
 ) {
     let needs_rebuild = {
         let mut m = model.write();
-        m.db.set_wifi_credentials(&values.wifi).ok();
-        m.wifi_creds = Some(values.wifi);
-
         let role_changed = values.role != m.role;
         if role_changed {
             m.db.set_role(values.role).ok();
             m.role = values.role;
+        }
+
+        // A reflection's network is its primary's; the dialog doesn't offer it.
+        if matches!(m.role, persistence::Role::Primary) {
+            m.db.set_wifi_credentials(&values.wifi).ok();
+            m.wifi_creds = Some(values.wifi);
+            publish_wifi(&m);
         }
 
         let prev_audio = m.db.audio_device_name().ok().flatten();
