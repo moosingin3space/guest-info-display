@@ -4,7 +4,7 @@ builddir/
 .flatpak-builder/
 repo/
 generated-sources.json
-/guest-info-display.flatpak
+/*.flatpak
 # Flatpak repository site, assembled by build-aux/publish-flatpak-repo.sh.
 /_site
 # Created by the CI build command (`just ci-build` runs it verbatim).
