@@ -194,6 +194,15 @@ pub enum Widget {
         heading: String,
         size: f32,
     },
+    /// A QR code for any text — usually a URL — with optional words above and
+    /// below it. The text is checked to fit in a code at parse time.
+    Qr {
+        data: String,
+        heading: Option<String>,
+        /// Shown under the code, for anyone who would rather type it.
+        caption: Option<String>,
+        size: f32,
+    },
     Text {
         content: String,
     },

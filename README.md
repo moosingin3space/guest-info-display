@@ -144,6 +144,7 @@ built-in arrangement, which is the cheapest useful edit there is.
 | `now-playing-strip` | A compact track line — small cover, title, artist and the next track. `direction="row"` (default) or `"column"`, `cover-size` (64), `show-next` (`#true`), `next-label` (`"Up next"`). Made for a strip above or below a `video`, or under the Wi-Fi code. |
 | `cover-art` | `size` — the artwork alone, with no text |
 | `wifi-qr` | `heading`, `size` (220) |
+| `qr` | The text to encode — usually a URL — as the first argument; `heading`, `caption` (small text under the code), `size` (220) |
 | `text` | The string to show, as the first argument |
 | `image` | Path as the first argument, `fit="cover"` or `"contain"` |
 | `video` | Paths as arguments and/or `item` children; `fit`, `muted` (`#true`), `loop` (`#true`), `shuffle` (`#false`), `wait-for-reflections` (`#false`) |
