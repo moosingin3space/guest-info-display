@@ -148,6 +148,21 @@ fn node(n: &Node, parent: Direction, ctx: &Ctx<'_>) -> Option<Element> {
         .into(),
         Widget::CoverArt { size } => cover_art(*size, &n.style, parent, ctx).into(),
         Widget::WifiQr { heading, size } => wifi_qr(heading, *size, &n.style, parent, ctx).into(),
+        Widget::Qr {
+            data,
+            heading,
+            caption,
+            size,
+        } => qr(
+            data,
+            heading.as_deref(),
+            caption.as_deref(),
+            *size,
+            &n.style,
+            parent,
+            ctx,
+        )
+        .into(),
         Widget::Text { content } => {
             styled_label(&n.style, ctx, 20.0, Weight::Normal, ctx.theme.text)
                 .text(content.clone())
@@ -502,8 +517,7 @@ fn wifi_qr(heading: &str, size: f32, style: &Style, parent: Direction, ctx: &Ctx
         .corner_radius(12.)
         .overflow(Overflow::Clip);
 
-    // Wi-Fi credentials are deliberately per-device: two screens in two rooms
-    // on two networks show two different codes from one mirrored layout.
+    // A reflection's credentials are its primary's, mirrored like the layout.
     let boxed = match &ctx.model.wifi_creds {
         Some(creds) => boxed.child(qr_code::wifi_qr_element(creds)),
         None => boxed
@@ -522,6 +536,49 @@ fn wifi_qr(heading: &str, size: f32, style: &Style, parent: Direction, ctx: &Ctx
                 .text(heading.to_string()),
         )
         .child(boxed)
+}
+
+/// A `qr` node: a code for any text, with the same box as `wifi-qr` and
+/// optional words above and below.
+fn qr(
+    data: &str,
+    heading: Option<&str>,
+    caption: Option<&str>,
+    size: f32,
+    style: &Style,
+    parent: Direction,
+    ctx: &Ctx<'_>,
+) -> Rect {
+    let outer = apply_box(
+        rect(),
+        style,
+        parent,
+        BoxDefaults {
+            spacing: Some(16.),
+            cross_align: Some(Align::Center),
+            ..BoxDefaults::default()
+        },
+    );
+
+    let boxed = rect()
+        .width(Size::px(size))
+        .height(Size::px(size))
+        .corner_radius(12.)
+        .overflow(Overflow::Clip)
+        .child(qr_code::qr_element(data));
+
+    outer
+        .maybe_child(heading.map(|heading| {
+            styled_label(style, ctx, 20.0, Weight::SemiBold, ctx.theme.text)
+                .text(heading.to_string())
+        }))
+        .child(boxed)
+        .maybe_child(caption.map(|caption| {
+            label()
+                .color(rgba(ctx.theme.muted_text))
+                .font_size(14.)
+                .text(caption.to_string())
+        }))
 }
 
 /// An `image` node: the host's own picture, or a box naming the file that is

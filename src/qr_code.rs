@@ -35,7 +35,18 @@ fn escape_field(s: &str) -> String {
 /// The returned element should be placed inside a fixed-size container.
 /// Falls back to a text placeholder if QR generation fails.
 pub fn wifi_qr_element(creds: &WifiCredentials) -> Element {
-    let Ok(qr) = QrCode::encode_text(&wifi_string(creds), QrCodeEcc::Medium) else {
+    qr_element(&wifi_string(creds))
+}
+
+/// Whether `text` fits in a QR code at the error correction we draw with.
+pub fn fits(text: &str) -> bool {
+    QrCode::encode_text(text, QrCodeEcc::Medium).is_ok()
+}
+
+/// Renders a QR code for any text that fills its parent element, like
+/// [`wifi_qr_element`].
+pub fn qr_element(text: &str) -> Element {
+    let Ok(qr) = QrCode::encode_text(text, QrCodeEcc::Medium) else {
         return rect().expanded().center().child("QR unavailable").into();
     };
 

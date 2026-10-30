@@ -45,6 +45,7 @@ const WIDGET_NAMES: &[&str] = &[
     "now-playing-strip",
     "cover-art",
     "wifi-qr",
+    "qr",
     "text",
     "image",
     "video",
@@ -614,6 +615,26 @@ impl<'a> Parser<'a> {
                     .unwrap_or_else(|| "Scan to connect to Wi-Fi".to_string()),
                 size: self.opt_number(&mut entries, "size").unwrap_or(220.0),
             },
+            "qr" => {
+                let Some(entry) = entries.arg(0) else {
+                    self.error(node.span(), "`qr` needs the text to encode, e.g. a URL");
+                    return None;
+                };
+                let data = self.string(entry, "qr")?;
+                if !crate::qr_code::fits(&data) {
+                    self.error(
+                        entry.span(),
+                        format!("`qr`: {} bytes is too long for a QR code", data.len()),
+                    );
+                    return None;
+                }
+                Widget::Qr {
+                    data,
+                    heading: self.opt_string(&mut entries, "heading"),
+                    caption: self.opt_string(&mut entries, "caption"),
+                    size: self.opt_number(&mut entries, "size").unwrap_or(220.0),
+                }
+            }
             "text" => {
                 let entry = entries.arg(0)?;
                 let content = self.string(entry, "text")?;
@@ -1084,6 +1105,68 @@ mod tests {
         assert_eq!(d.severity, Severity::Error);
         assert_eq!(d.line, 2, "diagnostic should point at the typo's line");
         assert!(d.message.contains("did you mean `clock`"), "{}", d.message);
+    }
+
+    #[test]
+    fn qr_takes_any_text_and_optional_words() {
+        let p = ok(r#"
+            root {
+                qr "https://example.com/project" heading="Like this?" caption="example.com/project" size=180
+                qr "plain text"
+            }
+        "#);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+
+        let root = p.root.expect("root");
+        let kids = children_of(&root);
+        match &kids[0].widget {
+            Widget::Qr {
+                data,
+                heading,
+                caption,
+                size,
+            } => {
+                assert_eq!(data, "https://example.com/project");
+                assert_eq!(heading.as_deref(), Some("Like this?"));
+                assert_eq!(caption.as_deref(), Some("example.com/project"));
+                assert_eq!(*size, 180.0);
+            }
+            other => panic!("expected a qr, found {other:?}"),
+        }
+        assert!(matches!(
+            &kids[1].widget,
+            Widget::Qr { heading: None, caption: None, size, .. } if *size == 220.0
+        ));
+    }
+
+    #[test]
+    fn qr_without_text_or_too_long_is_skipped_with_an_error() {
+        let long = "x".repeat(5000);
+        let p = ok(&format!(
+            "root {{\n  qr heading=\"Hi\"\n  qr \"{long}\"\n  date\n}}"
+        ));
+        // Both codes are gone; their sibling survives.
+        let root = p.root.expect("root");
+        assert_eq!(children_of(&root).len(), 1);
+
+        let errors: Vec<_> = p
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(errors[0].line, 2);
+        assert!(
+            errors[0].message.contains("needs the text"),
+            "{}",
+            errors[0].message
+        );
+        assert_eq!(errors[1].line, 3);
+        assert!(
+            errors[1].message.contains("too long"),
+            "{}",
+            errors[1].message
+        );
     }
 
     #[test]
