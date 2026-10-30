@@ -134,14 +134,21 @@ impl Component for SettingsDialog {
             ))
             .child(field(
                 "Password",
-                Input::new(password)
+                // Beside the field, not in its `trailing` slot: the input takes
+                // the pointer-down to focus itself and cancels the press for
+                // anything inside it, so a trailing button never fires.
+                rect()
                     .width(Size::fill())
-                    .mode(if show {
+                    .horizontal()
+                    .content(Content::Flex)
+                    .cross_align(Alignment::Center)
+                    .spacing(8.)
+                    .child(Input::new(password).width(Size::flex(1.)).mode(if show {
                         InputMode::Shown
                     } else {
                         InputMode::new_password()
-                    })
-                    .trailing(
+                    }))
+                    .child(
                         Button::new()
                             .flat()
                             .compact()
