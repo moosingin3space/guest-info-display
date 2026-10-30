@@ -202,28 +202,53 @@ async fn handle_subscribe(
 
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let watch = tx.clone();
+    // Room for a layout's document plus its images in one batch.
+    let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(256);
     if let Ok(mut guard) = shared.subscribers.lock() {
         guard.push(Subscriber {
             id,
             endpoint_id,
-            sender: tx,
+            sender: queue_tx,
         });
     }
+
+    forward(queue_rx, tx).await;
 
     // Forget the subscription as soon as the reflection goes away. Sending to
     // it would notice too, but only at the next broadcast — and a primary
     // holding a clip for its reflections broadcasts next to nothing, so it
     // would wait on a screen that is gone. By id, not endpoint: a reflection
     // that reconnected quickly has a newer subscription to keep.
-    tokio::spawn(async move {
-        watch.closed().await;
-        if let Ok(mut guard) = shared.subscribers.lock() {
-            guard.retain(|s| s.id != id);
+    if let Ok(mut guard) = shared.subscribers.lock() {
+        guard.retain(|s| s.id != id);
+    }
+    log::info!(
+        "multi_screen: reflection {} unsubscribed",
+        endpoint_id.fmt_short()
+    );
+}
+
+/// Write a subscription's queue to its stream until either end goes away.
+///
+/// The one task that touches `tx` after the replay: a remote irpc sender holds
+/// its lock for as long as `closed()` is pending, so a send from anywhere else
+/// would wait for the reflection to leave. Here `closed()` is only polled while
+/// idle and dropped, releasing it, as soon as a message is ready.
+async fn forward(
+    mut queue: tokio::sync::mpsc::Receiver<WireMessage>,
+    tx: irpc::channel::mpsc::Sender<WireMessage>,
+) {
+    loop {
+        tokio::select! {
+            msg = queue.recv() => {
+                // None: the broadcast dropped this subscriber.
+                let Some(msg) = msg else { return };
+                if let Err(e) = tx.send(msg).await {
+                    log::debug!("multi_screen: subscriber stream closed: {e}");
+                    return;
+                }
+            }
+            _ = tx.closed() => return,
         }
-        log::info!(
-            "multi_screen: reflection {} unsubscribed",
-            endpoint_id.fmt_short()
-        );
-    });
+    }
 }

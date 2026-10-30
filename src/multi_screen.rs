@@ -31,7 +31,6 @@ use std::sync::{Arc, Mutex};
 use async_channel::{Receiver as AsyncReceiver, Sender as AsyncSender};
 use iroh::{Endpoint, EndpointId, SecretKey, protocol::Router};
 use irpc::LocalSender;
-use irpc::channel::mpsc::Sender as IrpcSender;
 use irpc_iroh::IrohProtocol;
 use tokio::sync::oneshot;
 
@@ -163,7 +162,9 @@ pub(crate) struct Subscriber {
     /// This subscription, as opposed to the reflection's next one.
     pub id: u64,
     pub endpoint_id: EndpointId,
-    pub sender: IrpcSender<WireMessage>,
+    /// Feeds the task that writes to the reflection's stream (see
+    /// `service::forward`); dropping it ends the subscription.
+    pub sender: tokio::sync::mpsc::Sender<WireMessage>,
 }
 
 /// Subscriber-registry + snapshot cache shared between the service handler
@@ -706,15 +707,21 @@ async fn broadcast_loop(
 
         let mut survivors = Vec::with_capacity(subscribers.len());
         'subscriber: for sub in subscribers {
+            // The spec's "drop slow subscribers" rule: one whose queue can't
+            // take the whole batch reconnects for a fresh replay rather than
+            // wedge the broadcast. This loop is the queue's only producer, so
+            // the capacity read here still holds for the sends below.
+            if sub.sender.capacity() < wires.len() {
+                log::debug!(
+                    "multi_screen: dropping slow subscriber {}",
+                    sub.endpoint_id.fmt_short()
+                );
+                continue;
+            }
             for wire in &wires {
-                // try_send is non-blocking: returns immediately whether the
-                // message was buffered or not, only erroring on closed channel.
-                // That matches the spec's "drop slow subscribers" rule — they
-                // reconnect for a fresh snapshot rather than wedge the
-                // broadcast.
-                if let Err(e) = sub.sender.try_send(wire.clone()).await {
+                if sub.sender.try_send(wire.clone()).is_err() {
                     log::debug!(
-                        "multi_screen: dropping subscriber {}: {e:?}",
+                        "multi_screen: dropping closed subscriber {}",
                         sub.endpoint_id.fmt_short()
                     );
                     continue 'subscriber;
