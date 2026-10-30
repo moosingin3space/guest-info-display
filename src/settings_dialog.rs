@@ -116,6 +116,67 @@ impl Component for SettingsDialog {
 
         let show = *show_password.read();
 
+        // A reflection shows its primary's network, which arrives over the
+        // wire and would overwrite anything entered here.
+        let wifi: Element = if current_role == Role::Primary {
+            rect()
+                .width(Size::fill())
+                .spacing(16.)
+                .child(field(
+                    "Network name (SSID)",
+                    Input::new(ssid)
+                        .placeholder("MyNetwork")
+                        .width(Size::fill()),
+                ))
+                .child(field(
+                    "Password",
+                    // Beside the field, not in its `trailing` slot: the input takes
+                    // the pointer-down to focus itself and cancels the press for
+                    // anything inside it, so a trailing button never fires.
+                    rect()
+                        .width(Size::fill())
+                        .horizontal()
+                        .content(Content::Flex)
+                        .cross_align(Alignment::Center)
+                        .spacing(8.)
+                        .child(Input::new(password).width(Size::flex(1.)).mode(if show {
+                            InputMode::Shown
+                        } else {
+                            InputMode::new_password()
+                        }))
+                        .child(
+                            Button::new()
+                                .flat()
+                                .compact()
+                                .on_press(move |_| show_password.toggle())
+                                .child(if show { "Hide" } else { "Show" }),
+                        ),
+                ))
+                .child(field(
+                    "Security type",
+                    Select::new().selected_item(security_label).children(
+                        security_options.iter().map(|(name, value)| {
+                            let value = value.clone();
+                            MenuItem::new()
+                                .selected(value == current_security)
+                                .on_press(move |_| security.set(value.clone()))
+                                .child(*name)
+                                .into()
+                        }),
+                    ),
+                ))
+                .into()
+        } else {
+            field(
+                "Wi-Fi",
+                label()
+                    .color(MUTED)
+                    .font_size(13.)
+                    .text("The QR code shows the primary's network."),
+            )
+            .into()
+        };
+
         let form = rect()
             .width(Size::fill())
             .spacing(16.)
@@ -126,49 +187,7 @@ impl Component for SettingsDialog {
                     .child(role_tile(Role::Primary, "Primary"))
                     .child(role_tile(Role::Reflection, "Reflection")),
             ))
-            .child(field(
-                "Network name (SSID)",
-                Input::new(ssid)
-                    .placeholder("MyNetwork")
-                    .width(Size::fill()),
-            ))
-            .child(field(
-                "Password",
-                // Beside the field, not in its `trailing` slot: the input takes
-                // the pointer-down to focus itself and cancels the press for
-                // anything inside it, so a trailing button never fires.
-                rect()
-                    .width(Size::fill())
-                    .horizontal()
-                    .content(Content::Flex)
-                    .cross_align(Alignment::Center)
-                    .spacing(8.)
-                    .child(Input::new(password).width(Size::flex(1.)).mode(if show {
-                        InputMode::Shown
-                    } else {
-                        InputMode::new_password()
-                    }))
-                    .child(
-                        Button::new()
-                            .flat()
-                            .compact()
-                            .on_press(move |_| show_password.toggle())
-                            .child(if show { "Hide" } else { "Show" }),
-                    ),
-            ))
-            .child(field(
-                "Security type",
-                Select::new()
-                    .selected_item(security_label)
-                    .children(security_options.iter().map(|(name, value)| {
-                        let value = value.clone();
-                        MenuItem::new()
-                            .selected(value == current_security)
-                            .on_press(move |_| security.set(value.clone()))
-                            .child(*name)
-                            .into()
-                    })),
-            ))
+            .child(wifi)
             .child(field(
                 "Audio output",
                 Select::new()

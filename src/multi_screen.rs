@@ -39,6 +39,7 @@ use videos::VideoRef;
 
 pub use proto::PairingResponse;
 
+use crate::persistence::WifiCredentials;
 use crate::spotify::{self, SharedSpotifyState, SpotifyState};
 
 /// ALPN identifying our irpc service. Bumped when the protocol breaks
@@ -46,11 +47,12 @@ use crate::spotify::{self, SharedSpotifyState, SpotifyState};
 ///
 /// `/2` added `WireMessage::Layout`; `/3` added `WireMessage::Asset`; `/4` gave
 /// `Layout` its video hashes; `/5` added video cues and the `Time` request for
-/// synchronised playback. Postcard rejects an unknown discriminant, so an
-/// un-upgraded reflection cannot decode either; bumping the ALPN means it fails
-/// to connect at all and shows "Primary unavailable", which is a diagnosable
-/// failure rather than a mysterious one. Both ends must be updated together.
-pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/5";
+/// synchronised playback; `/6` added `WireMessage::Wifi`. Postcard rejects an
+/// unknown discriminant, so an un-upgraded reflection cannot decode either;
+/// bumping the ALPN means it fails to connect at all and shows "Primary
+/// unavailable", which is a diagnosable failure rather than a mysterious one.
+/// Both ends must be updated together.
+pub const ALPN: &[u8] = b"xyz.mooshq.guest-info-display.display/6";
 
 /// Cross-runtime broadcast tunnel: GPUI thread pushes events synchronously,
 /// the multi-screen runtime drains them and fans them out to subscribers.
@@ -79,6 +81,7 @@ enum BroadcastEvent {
     },
     /// A primary's player started a clip, or picked the one after it.
     Cue(crate::video::sync::Cue),
+    Wifi(Option<WifiCredentials>),
 }
 
 /// Approval request surfaced to the GPUI side when an unknown peer calls
@@ -129,6 +132,8 @@ pub enum LayoutUpdate {
         received: u64,
         total: u64,
     },
+    /// The primary's Wi-Fi network, for the QR code.
+    Wifi(Option<WifiCredentials>),
 }
 
 /// Hands the GPUI side a primary-mirroring backend that produces the same
@@ -190,6 +195,8 @@ struct Shared {
     /// Encoded JPEG/PNG bytes keyed by Spotify cover URL. Populated each time
     /// a primary fetches a cover; cleared on session reset.
     cover_cache: Mutex<HashMap<String, Vec<u8>>>,
+    /// The primary's Wi-Fi network, replayed to every new subscriber.
+    last_wifi: Mutex<Option<WifiCredentials>>,
     inbound_trusted: TrustState,
 }
 
@@ -203,6 +210,7 @@ impl Shared {
             layout_videos: Mutex::new(Vec::new()),
             video_cues: Mutex::new(HashMap::new()),
             cover_cache: Mutex::new(HashMap::new()),
+            last_wifi: Mutex::new(None),
             inbound_trusted,
         })
     }
@@ -268,6 +276,11 @@ impl MultiScreenHandle {
             assets,
             videos,
         });
+    }
+
+    /// Tell every reflection which network the QR code should offer.
+    pub fn broadcast_wifi(&self, wifi: Option<WifiCredentials>) {
+        let _ = self.broadcast_tx.try_send(BroadcastEvent::Wifi(wifi));
     }
 
     /// Tell every reflection what a `video` node is playing.
@@ -650,6 +663,12 @@ async fn broadcast_loop(
                     guard.insert(cue.node, cue.clone());
                 }
                 vec![WireMessage::VideoCue(cue)]
+            }
+            BroadcastEvent::Wifi(wifi) => {
+                if let Ok(mut guard) = shared.last_wifi.lock() {
+                    *guard = wifi.clone();
+                }
+                vec![WireMessage::Wifi(wifi)]
             }
             BroadcastEvent::CoversCleared => {
                 if let Ok(mut guard) = shared.cover_cache.lock() {

@@ -160,6 +160,14 @@ async fn handle_subscribe(
         }
     };
 
+    let wifi = match shared.last_wifi.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("multi_screen: wifi lock poisoned: {e}");
+            return;
+        }
+    };
+
     let endpoint_id = req.inner.endpoint_id;
     let tx = req.tx;
 
@@ -189,6 +197,10 @@ async fn handle_subscribe(
         }
     }
 
+    if let Err(e) = tx.send(WireMessage::Wifi(wifi)).await {
+        log::debug!("multi_screen: subscriber dropped during wifi: {e}");
+        return;
+    }
     if let Err(e) = tx.send(WireMessage::Snapshot(snapshot)).await {
         log::debug!("multi_screen: subscriber dropped during snapshot: {e}");
         return;
