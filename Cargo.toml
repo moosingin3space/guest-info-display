@@ -13,7 +13,7 @@ cpal = "0.16"
 # freya-skia-bindings version this resolves to. Bump both together, along
 # with the manifest's URLs and checksums.
 # `engine` only re-exports Skia types (for the QR canvas); it adds no Skia features.
-freya = { version = "=0.4.3", features = ["engine"] }
+freya = { version = "=0.5.0", features = ["engine"] }
 # Not used directly. Present only to turn on `no-compile`, so a prebuilt key
 # mismatch panics instead of silently building Skia from source.
 # default-features = false so this entry adds no features to the key.
