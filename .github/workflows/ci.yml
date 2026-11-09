@@ -39,7 +39,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build and test
-        uses: wolfi-dev/wolfi-act@7f6915e256697663d18940570e932e990e6adb93 # main
+        uses: wolfi-dev/wolfi-act@634e2600f741167ba9e84313f66e144f3661086f # main
         with:
           # curl: freya-skia-bindings shells out to it to fetch the Skia prebuilt.
           # gstreamer-dev, gst-plugins-base-dev: video playback (app, video and
@@ -61,7 +61,7 @@ jobs:
           persist-credentials: false
 
       - name: Generate generated-sources.json from Cargo.lock
-        uses: wolfi-dev/wolfi-act@7f6915e256697663d18940570e932e990e6adb93 # main
+        uses: wolfi-dev/wolfi-act@634e2600f741167ba9e84313f66e144f3661086f # main
         with:
           packages: python-3.13,py3-aiohttp,py3-tomlkit,curl,git
           command: |
